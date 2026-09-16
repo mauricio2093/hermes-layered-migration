@@ -1,0 +1,49 @@
+# Which layer-2 group was validated against which upstream version.
+# Update after every reapplication. Machines read this file; humans read the
+# operational panel.
+
+hermes:
+  ported_from: "0.20.1"        # the old checkout (shallow, feature branch)
+  tested_against: "0.21.3"     # clean clone of main
+  upstream_ref: "6bea68a1de"
+
+# Verdicts come from `git apply --reverse --check` against the clean clone:
+#   reverses cleanly -> already upstream, drop it
+#   applies cleanly  -> missing, lands without friction
+#   conflicts        -> surrounding code moved; needs manual review
+groups:
+  telegram:
+    count: 2
+    port_status: applied
+    offline_validation: passed
+    live_validation: pending
+    full_test_suite: not_run_due_to_resource_limit
+    patches: patches/telegram/
+    tests:
+      platform_suite: "695 -> 733 passed, 2 skipped (68 files, +38 new)"
+      affected_importers: "126 -> 128 passed (9 files)"
+      regressions: 0
+    note: |
+      Two independent features that one historical label had merged.
+
+      A - copy-command buttons. The pure module dropped in unchanged (185
+      lines, stdlib only). The adapter needed 4 hook points (+24/-3) instead
+      of the original 5: upstream had merged the markdown and plain send
+      branches into one helper. The port came out smaller than the patch.
+
+      B - JSON priority. Upstream does handle a string now, but as a single
+      command name, so '["status","help"]' became the invented name
+      "statushelp" after sanitizing: a plausible wrong value rather than a
+      visible error. The decoder is deliberately narrow.
+
+  streaming: {count: 5, port_status: pending, verdict: conflict}
+  tls:       {count: 2, port_status: pending, verdict: conflict}
+  providers: {count: 1, port_status: pending, verdict: conflict}
+  config:    {count: 1, port_status: pending, verdict: conflict, required: false}
+  chore:     {count: 2, port_status: upstreamed, note: "reverses cleanly; do not reapply"}
+
+unrecoverable:
+  - reason: |
+      The root commit of a shallow clone has no parent, so `format-patch`
+      emits the entire upstream tree as one 162 MB patch. Its real diff is
+      not recoverable from a truncated history.

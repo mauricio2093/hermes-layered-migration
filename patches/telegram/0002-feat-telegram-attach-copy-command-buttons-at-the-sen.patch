@@ -1,0 +1,97 @@
+From 0e34030e54f2d3fee6dd57597511b345c6145e20 Mon Sep 17 00:00:00 2001
+From: Mauricio Cadena <68365906+mauricio2093@users.noreply.github.com>
+Date: Wed, 16 Sep 2026 11:38:25 -0500
+Subject: [PATCH 2/4] feat(telegram): attach copy-command buttons at the send
+ boundary
+
+Four hook points: the rich payload gets a raw Bot API keyboard, the legacy
+path gets a PTB markup through send_kwargs, and the chunk loop computes the
+buttons from the full reply so they land under the last message only.
+
+_send_chunk_with_retries takes extra_send_kwargs as an optional keyword with
+a None default, so a later upstream merge that touches the signature does not
+conflict. Existing keyboards are preserved: build_markup appends rows below
+whatever the caller already set, leaving approval buttons intact.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01KBu6FrD3h2WVJEPWjh8n28
+---
+ plugins/platforms/telegram/adapter.py | 27 ++++++++++++++++++++++++---
+ 1 file changed, 24 insertions(+), 3 deletions(-)
+
+diff --git a/plugins/platforms/telegram/adapter.py b/plugins/platforms/telegram/adapter.py
+index 193f896e3b..a08c47b24a 100644
+--- a/plugins/platforms/telegram/adapter.py
++++ b/plugins/platforms/telegram/adapter.py
+@@ -148,6 +148,7 @@ from plugins.platforms.telegram.telegram_entities import expand_link_entities
+ from plugins.platforms.telegram.telegram_ids import normalize_telegram_chat_id
+ from plugins.platforms.telegram.telegram_network import (
+     SEED_FALLBACK_IPS, TelegramFallbackTransport, discover_fallback_ips, parse_fallback_ip_env, tcp_keepalive_socket_options)
++from plugins.platforms.telegram import shell_copy
+ from utils import env_float, env_int
+ 
+ _TELEGRAM_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+@@ -1469,6 +1470,11 @@ class TelegramAdapter(BasePlatformAdapter):
+         payload: Dict[str, Any] = {"chat_id": normalize_telegram_chat_id(chat_id), "rich_message": self._rich_message_payload(content)}
+         if getattr(self, "_disable_link_previews", False):
+             payload["link_preview_options"] = {"is_disabled": True}
++        # do_api_request takes plain JSON, so the copy-command keyboard is built as a
++        # raw Bot API object rather than a PTB model.
++        copy_markup = shell_copy.markup_payload(content)
++        if copy_markup is not None:
++            payload["reply_markup"] = copy_markup
+         return payload
+ 
+     def _rich_rejected(self, exc: Exception, what: str, fallback: str) -> bool:
+@@ -3260,6 +3266,18 @@ class TelegramAdapter(BasePlatformAdapter):
+             return True
+         return chunk_index == 0  # "first" (default)
+ 
++    def _copy_button_kwargs(
++        self, content: str, chunk_index: int = 0, total_chunks: int = 1, existing: Any = None) -> Dict[str, Any]:
++        """``reply_markup`` carrying the copy-command buttons, if any.
++
++        Derived from the reply text at the send boundary, so it does not depend on the
++        model choosing to emit a button. Attached to the last chunk only: a long reply
++        is split across several messages and the buttons belong under the final one."""
++        if chunk_index != total_chunks - 1:
++            return {}
++        markup = shell_copy.build_markup(content, existing)
++        return {"reply_markup": markup} if markup is not None else {}
++
+     @staticmethod
+     def _telegram_error_types() -> tuple:
+         """``(NetworkError, BadRequest, TimedOut)`` from PTB, with import-failure fallbacks
+@@ -3290,7 +3308,8 @@ class TelegramAdapter(BasePlatformAdapter):
+ 
+     async def _send_chunk_with_retries(
+         self, chat_id: str, chunk: str, index: int, reply_to: Optional[str], metadata: Optional[Dict[str, Any]],
+-        thread_id: Optional[str], used_thread_fallback: bool, error_types: tuple):
++        thread_id: Optional[str], used_thread_fallback: bool, error_types: tuple,
++        extra_send_kwargs: Optional[Dict[str, Any]] = None):
+         """Deliver one chunk: routing, up to 3 attempts, thread-not-found / deleted-anchor / flood handling.
+ 
+         Returns ``(msg, used_thread_fallback)`` on success or a ``SendResult`` to return verbatim (fail-loud DM-topic
+@@ -3310,7 +3329,8 @@ class TelegramAdapter(BasePlatformAdapter):
+             try:
+                 send_kwargs = {
+                     "chat_id": normalize_telegram_chat_id(chat_id), "reply_to_message_id": reply_to_id, **thread_kwargs,
+-                    **self._link_preview_kwargs(), **self._notification_kwargs(metadata)}
++                    **self._link_preview_kwargs(), **self._notification_kwargs(metadata),
++                    **(extra_send_kwargs or {})}
+                 return await self._send_chunk_markdown_or_plain(chunk, send_kwargs), used_thread_fallback
+             except _NetErr as send_err:
+                 # BadRequest subclasses NetworkError in PTB but is permanent; handle specific cases.
+@@ -3474,7 +3494,8 @@ class TelegramAdapter(BasePlatformAdapter):
+             used_thread_fallback = False
+             for i, chunk in enumerate(chunks):
+                 outcome = await self._send_chunk_with_retries(
+-                    chat_id, chunk, i, reply_to, metadata, thread_id, used_thread_fallback, error_types)
++                    chat_id, chunk, i, reply_to, metadata, thread_id, used_thread_fallback, error_types,
++                    self._copy_button_kwargs(content, i, len(chunks)))
+                 if isinstance(outcome, SendResult):
+                     return outcome
+                 msg, used_thread_fallback = outcome
+-- 
+2.53.0
+

@@ -1,0 +1,421 @@
+From dcceb8db3b7199aa74cd3ce6f58466281f0c7c03 Mon Sep 17 00:00:00 2001
+From: Mauricio Cadena <68365906+mauricio2093@users.noreply.github.com>
+Date: Wed, 16 Sep 2026 11:38:37 -0500
+Subject: [PATCH 3/4] test(telegram): cover the copy-command rules
+
+Ported unchanged except one import: Platform moved from gateway.platforms.base
+to gateway.config upstream, and the file already imported PlatformConfig from
+there, so the two lines merge into one.
+
+Covers single and multiline blocks, several blocks, non-shell fences, the
+256-character limit, markdown variations, provider independence, and that an
+existing keyboard survives.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01KBu6FrD3h2WVJEPWjh8n28
+---
+ tests/gateway/test_telegram_copy_command.py | 392 ++++++++++++++++++++
+ 1 file changed, 392 insertions(+)
+ create mode 100644 tests/gateway/test_telegram_copy_command.py
+
+diff --git a/tests/gateway/test_telegram_copy_command.py b/tests/gateway/test_telegram_copy_command.py
+new file mode 100644
+index 0000000000..e59b145095
+--- /dev/null
++++ b/tests/gateway/test_telegram_copy_command.py
+@@ -0,0 +1,392 @@
++"""Tests for deterministic Telegram "copy command" buttons.
++
++Covers the pure detection rules in ``shell_copy`` and their integration into
++both send paths of the Telegram adapter (legacy MarkdownV2 and the Bot API
++10.1 sendRichMessage fast path).
++"""
++
++import sys
++import types
++from pathlib import Path
++from types import SimpleNamespace
++
++import pytest
++
++_repo = str(Path(__file__).resolve().parents[2])
++if _repo not in sys.path:
++    sys.path.insert(0, _repo)
++
++from gateway.config import Platform, PlatformConfig
++
++from plugins.platforms.telegram import shell_copy
++from plugins.platforms.telegram.shell_copy import (
++    COPY_TEXT_LIMIT,
++    build_rows,
++    button_labels,
++    copyable_commands,
++    extract_commands,
++    markup_payload,
++)
++
++
++# ---------------------------------------------------------------------------
++# Fake telegram module (mirrors test_telegram_username_chat_id.py)
++# ---------------------------------------------------------------------------
++
++class _FakeCopyTextButton:
++    def __init__(self, text):
++        self.text = text
++
++
++class _FakeInlineKeyboardButton:
++    def __init__(self, label, callback_data=None, copy_text=None):
++        self.label = label
++        self.callback_data = callback_data
++        self.copy_text = copy_text
++
++
++class _FakeInlineKeyboardMarkup:
++    def __init__(self, rows):
++        self.inline_keyboard = rows
++
++
++_fake_telegram = types.ModuleType("telegram")
++_fake_telegram.CopyTextButton = _FakeCopyTextButton
++_fake_telegram.InlineKeyboardButton = _FakeInlineKeyboardButton
++_fake_telegram.InlineKeyboardMarkup = _FakeInlineKeyboardMarkup
++_fake_telegram.Update = object
++_fake_telegram.Bot = object
++_fake_telegram.Message = object
++
++_fake_telegram_error = types.ModuleType("telegram.error")
++_fake_telegram_error.NetworkError = type("NetworkError", (OSError,), {})
++_fake_telegram_error.TimedOut = type("TimedOut", (OSError,), {})
++_fake_telegram_error.BadRequest = type("BadRequest", (OSError,), {})
++_fake_telegram.error = _fake_telegram_error
++
++_fake_telegram_constants = types.ModuleType("telegram.constants")
++_fake_telegram_constants.ParseMode = SimpleNamespace(
++    MARKDOWN="Markdown", MARKDOWN_V2="MarkdownV2", HTML="HTML",
++)
++_fake_telegram_constants.ChatType = SimpleNamespace(
++    PRIVATE="private", GROUP="group", SUPERGROUP="supergroup", CHANNEL="channel",
++)
++_fake_telegram.constants = _fake_telegram_constants
++
++_fake_telegram_ext = types.ModuleType("telegram.ext")
++for _attr in (
++    "Application", "CommandHandler", "CallbackQueryHandler",
++    "MessageHandler", "TypeHandler",
++):
++    setattr(_fake_telegram_ext, _attr, object)
++_fake_telegram_ext.ContextTypes = SimpleNamespace(DEFAULT_TYPE=object)
++_fake_telegram_ext.filters = object
++
++_fake_telegram_request = types.ModuleType("telegram.request")
++_fake_telegram_request.HTTPXRequest = object
++
++
++@pytest.fixture(autouse=True)
++def _inject_fake_telegram(monkeypatch):
++    monkeypatch.setitem(sys.modules, "telegram", _fake_telegram)
++    monkeypatch.setitem(sys.modules, "telegram.error", _fake_telegram_error)
++    monkeypatch.setitem(sys.modules, "telegram.constants", _fake_telegram_constants)
++    monkeypatch.setitem(sys.modules, "telegram.ext", _fake_telegram_ext)
++    monkeypatch.setitem(sys.modules, "telegram.request", _fake_telegram_request)
++
++
++def _make_adapter():
++    from plugins.platforms.telegram.adapter import TelegramAdapter
++
++    config = PlatformConfig(enabled=True, token="fake-token")
++    adapter = object.__new__(TelegramAdapter)
++    adapter.config = config
++    adapter._config = config
++    adapter._platform = Platform.TELEGRAM
++    adapter._connected = True
++    adapter._dm_topics = {}
++    adapter._dm_topics_config = []
++    adapter._reply_to_mode = "first"
++    adapter._fallback_ips = []
++    adapter._polling_conflict_count = 0
++    adapter._polling_network_error_count = 0
++    adapter._polling_error_callback_ref = None
++    adapter.platform = Platform.TELEGRAM
++    # Force the legacy MarkdownV2 path; the rich path is covered separately.
++    adapter._should_attempt_rich = lambda content, metadata=None: False
++    return adapter
++
++
++# ===========================================================================
++# Detection rules
++# ===========================================================================
++
++class TestSingleCommand:
++    """One bash command."""
++
++    def test_single_bash_command(self):
++        text = "Run this:\n\n```bash\nsudo systemctl restart sshd\n```\n"
++        cmds = extract_commands(text)
++
++        assert len(cmds) == 1
++        assert cmds[0].text == "sudo systemctl restart sshd"
++        assert cmds[0].fits
++
++    @pytest.mark.parametrize("lang", ["bash", "sh", "shell"])
++    def test_every_shell_lang_detected(self, lang):
++        assert len(extract_commands("```%s\nls -la\n```" % lang)) == 1
++
++    def test_copy_text_has_no_fences_or_quotes(self):
++        (cmd,) = extract_commands('```bash\necho "hi"\n```')
++
++        assert "```" not in cmd.text
++        assert not cmd.text.startswith('"')
++        assert cmd.text == 'echo "hi"'
++
++    def test_prompt_prefix_stripped(self):
++        (cmd,) = extract_commands("```bash\n$ whoami\n```")
++
++        assert cmd.text == "whoami"
++
++
++class TestMultilineBlock:
++    """Multiline bash block."""
++
++    def test_block_is_a_single_button(self):
++        text = (
++            "```bash\n"
++            "cd /srv/hermes\n"
++            "source venv/bin/activate\n"
++            "pytest -q\n"
++            "```"
++        )
++        cmds = extract_commands(text)
++
++        assert len(cmds) == 1
++        assert cmds[0].text.splitlines() == [
++            "cd /srv/hermes",
++            "source venv/bin/activate",
++            "pytest -q",
++        ]
++
++    def test_blank_lines_dropped(self):
++        (cmd,) = extract_commands("```bash\nls\n\n\npwd\n```")
++
++        assert cmd.text == "ls\npwd"
++
++
++class TestMultipleCommands:
++    """Several independent commands."""
++
++    def test_separate_blocks_give_separate_buttons(self):
++        text = (
++            "First:\n```bash\nsystemctl start sshd\n```\n"
++            "Then:\n```bash\nsystemctl enable sshd\n```\n"
++        )
++
++        assert [c.text for c in extract_commands(text)] == [
++            "systemctl start sshd",
++            "systemctl enable sshd",
++        ]
++
++    def test_labels_numbered_only_when_several(self):
++        assert button_labels(1) == ["📋 Copy command"]
++        assert button_labels(2) == ["📋 Copy command 1", "📋 Copy command 2"]
++
++    def test_one_button_per_row(self):
++        rows = build_rows("```bash\nls\n```\n```sh\npwd\n```")
++
++        assert len(rows) == 2
++        assert all(len(row) == 1 for row in rows)
++        assert rows[0][0] == ("📋 Copy command 1", "ls")
++
++
++class TestNonShellBlocks:
++    """Blocks that must never get a button."""
++
++    @pytest.mark.parametrize("lang", ["json", "yaml", "python", "text", "toml", ""])
++    def test_non_shell_language_ignored(self, lang):
++        assert extract_commands('```%s\n{"cmd": "rm -rf /"}\n```' % lang) == []
++
++    def test_log_output_ignored(self):
++        text = (
++            "```bash\n"
++            "2026-08-16 11:53:06, Info CBS Package Format: PSFX\n"
++            "2026-08-16 11:53:06, Info CBS Entering stage: Extracting\n"
++            "```"
++        )
++
++        assert extract_commands(text) == []
++
++    def test_ls_output_ignored(self):
++        text = (
++            "```bash\n"
++            "total 12\n"
++            "drwxrwxr-x 2 hermes hermes 4096 Jun 19 21:53 .\n"
++            "-rw-rw-r-- 1 hermes hermes  355 Jun 19 21:53 .env.example\n"
++            "```"
++        )
++
++        assert extract_commands(text) == []
++
++    def test_inline_command_in_prose_ignored(self):
++        assert extract_commands("Use `systemctl restart sshd` to restart.") == []
++
++    def test_empty_block_ignored(self):
++        assert extract_commands("```bash\n\n```") == []
++
++
++class TestLongCommand:
++    """Oversized blocks are never truncated."""
++
++    def test_flagged_and_no_button(self):
++        long_cmd = "echo " + "x" * (COPY_TEXT_LIMIT + 50)
++        text = "```bash\n%s\n```" % long_cmd
++
++        (cmd,) = extract_commands(text)
++
++        assert not cmd.fits
++        assert cmd.text == long_cmd
++        assert copyable_commands(text) == []
++        assert build_rows(text) == []
++
++    def test_exact_limit_still_fits(self):
++        (cmd,) = extract_commands("```bash\n%s\n```" % ("x" * COPY_TEXT_LIMIT))
++
++        assert cmd.fits
++
++    def test_long_block_does_not_suppress_others(self):
++        text = (
++            "```bash\n" + "y" * (COPY_TEXT_LIMIT + 1) + "\n```\n"
++            "```bash\nls\n```"
++        )
++
++        assert [c.text for c in copyable_commands(text)] == ["ls"]
++
++
++class TestMarkdownFormatting:
++    """Surrounding Markdown must not leak into the copied text."""
++
++    def test_markdown_around_block(self):
++        text = (
++            "## Install\n\n"
++            "**Important**: run *this* first.\n\n"
++            "```bash\nwinget install Microsoft.OpenSSH.Preview\n```\n\n"
++            "> Footnote\n"
++        )
++        (cmd,) = extract_commands(text)
++
++        assert cmd.text == "winget install Microsoft.OpenSSH.Preview"
++
++    def test_indented_fence_detected(self):
++        cmds = extract_commands("- Step 1:\n\n  ```bash\n  ls -la\n  ```\n")
++
++        assert len(cmds) == 1
++        assert cmds[0].text.strip() == "ls -la"
++
++
++class TestProviderAgnostic:
++    """Same text, any provider, same result."""
++
++    @pytest.mark.parametrize(
++        "prefix", ["", "Claude says:\n", "DeepSeek:\n", "[qwen3-1.7b]\n"],
++    )
++    def test_detection_ignores_provider(self, prefix):
++        (cmd,) = extract_commands(prefix + "```bash\nsystemctl status sshd\n```")
++
++        assert cmd.text == "systemctl status sshd"
++
++
++# ===========================================================================
++# Keyboard merging
++# ===========================================================================
++
++class TestExistingKeyboard:
++    """Existing inline keyboards and callbacks are preserved."""
++
++    def test_existing_rows_kept_and_copy_rows_appended(self):
++        existing = _FakeInlineKeyboardMarkup(
++            [[_FakeInlineKeyboardButton("✓ Yes", callback_data="y")]]
++        )
++
++        merged = shell_copy.build_markup("```bash\nls\n```", existing)
++
++        assert len(merged.inline_keyboard) == 2
++        assert merged.inline_keyboard[0][0].callback_data == "y"
++        assert merged.inline_keyboard[1][0].copy_text.text == "ls"
++
++    def test_original_markup_object_not_mutated(self):
++        rows = [[_FakeInlineKeyboardButton("✓ Yes", callback_data="y")]]
++        existing = _FakeInlineKeyboardMarkup(rows)
++
++        shell_copy.build_markup("```bash\nls\n```", existing)
++
++        assert len(existing.inline_keyboard) == 1
++
++    def test_no_commands_returns_original_untouched(self):
++        existing = _FakeInlineKeyboardMarkup([[_FakeInlineKeyboardButton("✓ Yes")]])
++
++        assert shell_copy.build_markup("just prose", existing) is existing
++        assert shell_copy.build_markup("just prose", None) is None
++
++
++# ===========================================================================
++# Adapter integration
++# ===========================================================================
++
++class TestAdapterSendPath:
++    """Buttons reach the Bot API through adapter.send()."""
++
++    @pytest.mark.asyncio
++    async def test_send_attaches_copy_button(self):
++        adapter = _make_adapter()
++        calls = []
++
++        async def mock_send_message(**kwargs):
++            calls.append(dict(kwargs))
++            return SimpleNamespace(message_id=99)
++
++        adapter._bot = SimpleNamespace(send_message=mock_send_message)
++
++        result = await adapter.send(
++            chat_id="12345", content="Run:\n```bash\nuptime\n```",
++        )
++
++        assert result.success is True
++        markup = calls[-1]["reply_markup"]
++        assert markup.inline_keyboard[0][0].copy_text.text == "uptime"
++
++    @pytest.mark.asyncio
++    async def test_plain_reply_gets_no_markup(self):
++        adapter = _make_adapter()
++        calls = []
++
++        async def mock_send_message(**kwargs):
++            calls.append(dict(kwargs))
++            return SimpleNamespace(message_id=99)
++
++        adapter._bot = SimpleNamespace(send_message=mock_send_message)
++
++        await adapter.send(chat_id="12345", content="no commands here")
++
++        assert "reply_markup" not in calls[-1]
++
++    def test_buttons_only_on_last_chunk(self):
++        adapter = _make_adapter()
++        content = "```bash\nuptime\n```"
++
++        assert adapter._copy_button_kwargs(content, 0, 3) == {}
++        assert adapter._copy_button_kwargs(content, 1, 3) == {}
++        assert "reply_markup" in adapter._copy_button_kwargs(content, 2, 3)
++
++    def test_rich_payload_uses_raw_bot_api_shape(self):
++        payload = markup_payload("```bash\nuptime\n```")
++
++        assert payload == {
++            "inline_keyboard": [
++                [{"text": "📋 Copy command", "copy_text": {"text": "uptime"}}]
++            ]
++        }
++
++    def test_rich_payload_none_without_commands(self):
++        assert markup_payload("just prose") is None
+-- 
+2.53.0
+

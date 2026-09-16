@@ -1,0 +1,216 @@
+From 3d7e6a631d726042bfce1d9ef03a400863c56fbb Mon Sep 17 00:00:00 2001
+From: Mauricio Cadena <68365906+mauricio2093@users.noreply.github.com>
+Date: Wed, 16 Sep 2026 11:37:29 -0500
+Subject: [PATCH 1/4] feat(telegram): pure rules for copy-command buttons
+
+Derives copyable shell commands from an already-generated reply by fixed
+rules, so the behaviour does not depend on the model choosing to emit a
+button. The core is pure (str -> commands) and imports only stdlib; the
+two PTB-facing helpers degrade to no button when CopyTextButton is absent.
+
+Only bash/sh/shell fences qualify. A fence is one unit, so it yields one
+button carrying every line. Blocks that look like output (timestamps, log
+levels, tracebacks, ls listings) are skipped, and a block over Telegram's
+256-character copy_text limit gets no button rather than being truncated.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01KBu6FrD3h2WVJEPWjh8n28
+---
+ plugins/platforms/telegram/shell_copy.py | 185 +++++++++++++++++++++++
+ 1 file changed, 185 insertions(+)
+ create mode 100644 plugins/platforms/telegram/shell_copy.py
+
+diff --git a/plugins/platforms/telegram/shell_copy.py b/plugins/platforms/telegram/shell_copy.py
+new file mode 100644
+index 0000000000..16f1e0774a
+--- /dev/null
++++ b/plugins/platforms/telegram/shell_copy.py
+@@ -0,0 +1,185 @@
++"""Deterministic "copy command" buttons for shell blocks.
++
++The button must not depend on the model deciding to emit one: it is derived
++from the already-generated reply text by fixed rules, so the behaviour is
++identical no matter which provider produced the response.
++
++The core is pure (``str`` -> commands) and imports nothing from ``telegram``;
++only :func:`build_markup` and :func:`markup_payload` touch PTB, so the rules
++stay unit-testable without the optional messaging extra installed.
++"""
++
++from __future__ import annotations
++
++import re
++from typing import Any, List, NamedTuple, Optional, Tuple
++
++# CopyTextButton.text is capped at 256 characters (Bot API 8.0).
++COPY_TEXT_LIMIT = 256
++
++# Only these fence languages are considered executable. JSON, YAML, python,
++# text, etc. are excluded by construction rather than by heuristics.
++SHELL_LANGS = frozenset({"bash", "sh", "shell"})
++
++_FENCE_RE = re.compile(
++    r"^[ \t]*```[ \t]*([A-Za-z0-9_+-]*)[ \t]*\n(.*?)^[ \t]*```[ \t]*$",
++    re.DOTALL | re.MULTILINE,
++)
++
++# Interactive prompt prefix: copy the command, not the prompt.
++_PROMPT_RE = re.compile(r"^\s*\$[ \t]+")
++
++# Signals that a fenced block holds command output rather than commands.
++# Deliberately conservative: when in doubt, offer the button.
++_OUTPUT_PATTERNS = (
++    re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}"),
++    re.compile(r"^\s*(INFO|WARN|WARNING|ERROR|DEBUG|TRACE|FATAL)\b"),
++    re.compile(r"^\s*(Traceback|File \"|\s+at )"),
++    re.compile(r"^\s*[-=]{4,}\s*$"),
++    re.compile(r"^\s*(total|drwx|-rw-|lrwx)"),
++)
++
++COPY_LABEL = "📋 Copy command"
++
++
++class ShellCommand(NamedTuple):
++    """A command ready to copy, already stripped of fences and prompts."""
++
++    text: str
++    fits: bool
++
++
++def _iter_fenced_blocks(text: str) -> List[Tuple[str, str]]:
++    return [(m.group(1).lower(), m.group(2)) for m in _FENCE_RE.finditer(text)]
++
++
++def _looks_like_output(lines: List[str]) -> bool:
++    if not lines:
++        return True
++
++    hits = sum(1 for line in lines if any(p.search(line) for p in _OUTPUT_PATTERNS))
++
++    # Simple majority: a log has nearly every line marked, a command list none.
++    return hits * 2 > len(lines)
++
++
++def _clean_block(body: str) -> List[str]:
++    cleaned = []
++
++    for raw in body.splitlines():
++        line = _PROMPT_RE.sub("", raw.rstrip())
++        if line.strip():
++            cleaned.append(line)
++
++    return cleaned
++
++
++def extract_commands(text: str) -> List[ShellCommand]:
++    """Extract copyable commands from a reply.
++
++    Grouping rule: one fenced block is a unit that runs together, so it yields
++    a single command carrying every line. Separate blocks are independent and
++    yield separate commands.
++    """
++    commands = []
++
++    for lang, body in _iter_fenced_blocks(text or ""):
++        if lang not in SHELL_LANGS:
++            continue
++
++        lines = _clean_block(body)
++
++        if not lines or _looks_like_output(lines):
++            continue
++
++        joined = "\n".join(lines)
++        commands.append(ShellCommand(joined, len(joined) <= COPY_TEXT_LIMIT))
++
++    return commands
++
++
++def copyable_commands(text: str) -> List[ShellCommand]:
++    """Commands that fit Telegram's copy_text limit.
++
++    Nothing is truncated silently: an oversized block simply gets no button
++    and the message is delivered unchanged, so the user still has the full
++    text inside the code block.
++    """
++    return [cmd for cmd in extract_commands(text) if cmd.fits]
++
++
++def button_labels(count: int) -> List[str]:
++    """Numbered only when there is more than one command."""
++    if count == 1:
++        return [COPY_LABEL]
++
++    return ["{} {}".format(COPY_LABEL, i + 1) for i in range(count)]
++
++
++def build_rows(text: str) -> List[List[Tuple[str, str]]]:
++    """Button rows as ``(label, copy_text)``, one command per row."""
++    commands = copyable_commands(text)
++    labels = button_labels(len(commands))
++
++    return [[(label, cmd.text)] for label, cmd in zip(labels, commands)]
++
++
++def build_markup(text: str, existing: Any = None) -> Any:
++    """Append copy buttons to ``existing`` without replacing it.
++
++    Existing keyboards and their callback buttons are preserved as-is and the
++    copy rows are appended below. With no commands the original keyboard is
++    returned untouched (``None`` included).
++    """
++    rows = build_rows(text)
++
++    if not rows:
++        return existing
++
++    try:
++        from telegram import (
++            CopyTextButton,
++            InlineKeyboardButton,
++            InlineKeyboardMarkup,
++        )
++    except ImportError:
++        # PTB missing or too old for CopyTextButton — degrade to no button
++        # rather than breaking the send.
++        return existing
++
++    new_rows = [
++        [
++            InlineKeyboardButton(label, copy_text=CopyTextButton(text=payload))
++            for label, payload in row
++        ]
++        for row in rows
++    ]
++
++    if existing is None:
++        return InlineKeyboardMarkup(new_rows)
++
++    old_rows = [list(row) for row in existing.inline_keyboard]
++
++    return InlineKeyboardMarkup(old_rows + new_rows)
++
++
++def markup_payload(text: str) -> Optional[dict]:
++    """Raw Bot API ``reply_markup`` object for the sendRichMessage path.
++
++    ``do_api_request`` takes plain JSON, so the keyboard is built as a dict
++    instead of a PTB model.
++    """
++    rows = build_rows(text)
++
++    if not rows:
++        return None
++
++    return {
++        "inline_keyboard": [
++            [
++                {"text": label, "copy_text": {"text": payload}}
++                for label, payload in row
++            ]
++            for row in rows
++        ]
++    }
+-- 
+2.53.0
+

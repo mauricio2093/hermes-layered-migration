@@ -1,0 +1,126 @@
+From 49b74883ddf165b020672905d7a5258b4bcf308b Mon Sep 17 00:00:00 2001
+From: Mauricio Cadena <68365906+mauricio2093@users.noreply.github.com>
+Date: Wed, 16 Sep 2026 11:40:39 -0500
+Subject: [PATCH 4/4] fix(telegram): accept a JSON-serialized priority list
+ from config set
+MIME-Version: 1.0
+Content-Type: text/plain; charset=UTF-8
+Content-Transfer-Encoding: 8bit
+
+hermes config set persists values as strings, so a configured priority list
+arrives serialized. Upstream reads a scalar string as one command name, which
+turned '["status", "help"]' into the single bogus name "statushelp" after
+sanitizing — a silent wrong value rather than a visible error.
+
+The decoder is deliberately narrow: valid JSON is not enough. Only a list
+whose items are all strings is adopted; everything else leaves raw_priority
+untouched so the existing upstream branch runs unchanged, not a reimplemented
+equivalent. A plain name, a quoted string, a number, an object and a mixed
+array all keep their current meaning.
+
+Upstream's scalar test is untouched and still passes.
+
+Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01KBu6FrD3h2WVJEPWjh8n28
+---
+ hermes_cli/commands_platforms.py  | 22 +++++++++++++++++++
+ tests/hermes_cli/test_commands.py | 36 +++++++++++++++++++++++++++++++
+ 2 files changed, 58 insertions(+)
+
+diff --git a/hermes_cli/commands_platforms.py b/hermes_cli/commands_platforms.py
+index 203b24b994..83a317eca3 100644
+--- a/hermes_cli/commands_platforms.py
++++ b/hermes_cli/commands_platforms.py
+@@ -4,6 +4,7 @@
+ from __future__ import annotations
+ 
+ import logging
++import json
+ import re
+ from collections.abc import Callable, Mapping, Sequence
+ from typing import Any
+@@ -116,6 +117,23 @@ _TELEGRAM_MENU_PRIORITY = (
+     "reasoning", "usage", "platforms", "platform", "profile", "whoami")
+ 
+ 
++def _priority_list_from_json(raw: str) -> list[str] | None:
++    """A JSON array of strings -> that list; anything else -> ``None``.
++
++    ``hermes config set`` persists values as strings, so a configured list arrives
++    serialized. Deliberately strict: valid JSON is not enough, because a scalar
++    string is a single command name upstream and that meaning must survive. Only a
++    list whose items are all strings takes this path; ``None`` leaves the caller on
++    the unchanged upstream branch."""
++    try:
++        decoded = json.loads(raw)
++    except (TypeError, ValueError):
++        return None
++    if isinstance(decoded, list) and all(isinstance(item, str) for item in decoded):
++        return decoded
++    return None
++
++
+ def _telegram_command_menu_config() -> dict[str, Any]:
+     """Normalized ``platforms.telegram.extra.command_menu`` config with safe defaults."""
+     try:
+@@ -132,6 +150,10 @@ def _telegram_command_menu_config() -> dict[str, Any]:
+         max_commands = _DEFAULT_TELEGRAM_MENU_MAX_COMMANDS
+     priority_mode = str(menu_cfg.get("priority_mode") or "prepend").strip().lower()
+     raw_priority = menu_cfg.get("priority")
++    if isinstance(raw_priority, str):
++        decoded_priority = _priority_list_from_json(raw_priority)
++        if decoded_priority is not None:
++            raw_priority = decoded_priority
+     if isinstance(raw_priority, list):
+         priority = [str(item) for item in raw_priority if str(item).strip()]
+     else:
+diff --git a/tests/hermes_cli/test_commands.py b/tests/hermes_cli/test_commands.py
+index 0beae73017..556bbfbae9 100644
+--- a/tests/hermes_cli/test_commands.py
++++ b/tests/hermes_cli/test_commands.py
+@@ -978,6 +978,42 @@ class TestTelegramMenuCommands:
+         assert menu_cfg["priority"] == ["gym"]
+         assert menu_cfg["priority_mode"] == "prepend"
+ 
++    @staticmethod
++    def _menu_cfg_for_priority(raw):
++        """``_telegram_command_menu_config()`` with *raw* as the configured priority."""
++        from unittest.mock import patch
++        from hermes_cli.commands_platforms import _telegram_command_menu_config
++
++        raw_config = {
++            "platforms": {"telegram": {"extra": {"command_menu": {"priority": raw}}}}}
++        with patch("hermes_cli.config.read_raw_config", return_value=raw_config):
++            return _telegram_command_menu_config()
++
++    def test_json_array_priority_is_decoded_into_a_list(self):
++        """``hermes config set`` persists a JSON array as a string; decode it.
++
++        A scalar string is one command name upstream, so a serialized list
++        would otherwise collapse into the single bogus name ``statushelp``.
++        """
++        assert self._menu_cfg_for_priority('["status", "help"]')["priority"] == ["status", "help"]
++
++    def test_non_list_json_keeps_upstream_scalar_behaviour(self):
++        """Valid JSON is not enough: only a list of strings changes anything.
++
++        Everything else must reach the exact upstream path, so a name that
++        happens to parse as JSON is still treated as one command.
++        """
++        unchanged = [
++            "status",            # plain name: upstream's scalar form
++            "mi-comando",        # hyphenated name, sanitized later
++            '"status"',          # JSON string, not an array
++            "123",               # JSON number
++            '{"a": "b"}',        # JSON object
++            '["status", 123]',   # array with a non-string item
++        ]
++        for raw in unchanged:
++            assert self._menu_cfg_for_priority(raw)["priority"] == [raw], raw
++
+ 
+ # ---------------------------------------------------------------------------
+ # Discord skill commands grouped by category
+-- 
+2.53.0
+
