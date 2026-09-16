@@ -1,0 +1,6 @@
+The patches under `patches/` are diffs against Hermes Agent
+(https://github.com/NousResearch/hermes-agent), MIT License,
+Copyright (c) 2025 Nous Research.
+
+They therefore contain context lines from that project. The changes
+themselves are original work; the surrounding code is not.

@@ -1,0 +1,12 @@
+# This repository holds tooling and doctrine. It never holds state or secrets.
+.env
+*.db
+*.db-wal
+*.db-shm
+auth.json
+backups/
+rescue/
+__pycache__/
+*.py[cod]
+.venv/
+venv/
