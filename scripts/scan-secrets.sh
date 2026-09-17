@@ -4,8 +4,11 @@
 set -uo pipefail
 REPO="${1:?uso: scan-secrets.sh <repo> [--tree-only]}"
 MODE="${2:-}"
-REDACT="${SCAN_REDACT:-0}"
-for a in "$@"; do [ "$a" = "--redact" ] && REDACT=1; done
+# Redactado POR DEFECTO: una deteccion no debe convertirse en una segunda
+# fuga al acabar en un log, un ticket o la salida de CI. --show-secret es
+# una decision consciente para diagnostico local.
+REDACT=1
+for a in "$@"; do [ "$a" = "--show-secret" ] && REDACT=0; done
 export REDACT
 cd "$REPO" || exit 1
 
@@ -20,6 +23,11 @@ PATTERNS = [
  ("OpenAI/Anthropic",   rb"\bsk-(ant-)?[A-Za-z0-9_-]{20,}"),
  ("Slack",              rb"\bxox[baprs]-[A-Za-z0-9-]{10,}"),
  ("GitHub PAT",         rb"\bgh[pousr]_[A-Za-z0-9]{36,}"),
+ ("GitHub fine-grained",rb"\bgithub_pat_[A-Za-z0-9_]{60,}"),
+ ("Hugging Face",       rb"\bhf_[A-Za-z0-9]{30,}"),
+ ("PyPI",               rb"\bpypi-AgEIcHlwaS5vcmc[A-Za-z0-9_-]{50,}"),
+ ("npm",                rb"\bnpm_[A-Za-z0-9]{36}\b"),
+ ("JWT",                rb"\beyJ[A-Za-z0-9_-]{10,}\.eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}"),
  ("AWS access key",     rb"\bAKIA[0-9A-Z]{16}\b"),
  ("Google API",         rb"\bAIza[0-9A-Za-z_-]{35}\b"),
  ("asignación secreta", rb"(?i)\b(pass(word|wd)?|secret|api[_-]?key|access[_-]?token|auth[_-]?token|bearer)\b\s*[:=]\s*['\"][^'\"\s]{8,}['\"]"),
@@ -60,7 +68,7 @@ for line in sys.stdin:
         # El fragmento es el secreto en claro: util para diagnosticar, peligroso
         # si la salida acaba en un fichero, un ticket o un pegado. --redact deja
         # tipo y ubicacion, que es lo que hace falta para ir a arreglarlo.
-        shown = "<redactado>" if REDACT else repr(frag)
+        shown = repr(frag) if not REDACT else "<redactado>"
         print(f"  \u26a0 {name:<20} {label}:{ln}  {shown}")
 print(f"\nhallazgos: {total}")
 sys.exit(1 if total else 0)
