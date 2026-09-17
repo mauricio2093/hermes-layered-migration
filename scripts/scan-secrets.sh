@@ -4,11 +4,16 @@
 set -uo pipefail
 REPO="${1:?uso: scan-secrets.sh <repo> [--tree-only]}"
 MODE="${2:-}"
+REDACT="${SCAN_REDACT:-0}"
+for a in "$@"; do [ "$a" = "--redact" ] && REDACT=1; done
+export REDACT
 cd "$REPO" || exit 1
 
 PY=$(mktemp); trap 'rm -f "$PY"' EXIT
 cat > "$PY" <<'PYEOF'
-import re, sys, subprocess
+import os, re, sys, subprocess
+
+REDACT = os.environ.get("REDACT") == "1"
 PATTERNS = [
  ("clave privada",      rb"-----BEGIN (RSA |EC |OPENSSH |PGP |DSA )?PRIVATE KEY"),
  ("token Telegram",     rb"\b\d{8,10}:[A-Za-z0-9_-]{30,40}\b"),
@@ -52,12 +57,16 @@ for line in sys.stdin:
         continue
     for name, label, ln, frag in scan(data, path):
         total += 1
-        print(f"  ⚠ {name:<20} {label}:{ln}  {frag!r}")
+        # El fragmento es el secreto en claro: util para diagnosticar, peligroso
+        # si la salida acaba en un fichero, un ticket o un pegado. --redact deja
+        # tipo y ubicacion, que es lo que hace falta para ir a arreglarlo.
+        shown = "<redactado>" if REDACT else repr(frag)
+        print(f"  \u26a0 {name:<20} {label}:{ln}  {shown}")
 print(f"\nhallazgos: {total}")
 sys.exit(1 if total else 0)
 PYEOF
 
-if [ "$MODE" = "--tree-only" ]; then
+if [ "$MODE" = "--tree-only" ] || [ "${3:-}" = "--tree-only" ]; then
   echo "== escaneando ÁRBOL ACTUAL de $REPO =="
   git ls-tree -r HEAD --format='%(objectname)%x09%(path)' | python3 "$PY"
 else

@@ -6,6 +6,7 @@ repository is.
 
     scan-secrets.sh /path/to/repo               # full history (default)
     scan-secrets.sh /path/to/repo --tree-only   # current tree only
+    scan-secrets.sh /path/to/repo --redact      # type and location only
 
 Exit status is non-zero when anything is found.
 
@@ -30,6 +31,16 @@ PATs, AWS access keys, Google API keys, credential assignments, and URLs with
 inline credentials. Obvious placeholders (`your-…`, `changeme`, `<token>`,
 `EXAMPLE`) are suppressed on their own line.
 
+## The output is itself sensitive
+
+By default a finding prints the matched fragment, which is the secret in clear
+text. That is what makes it useful -- you can see at a glance whether it is a
+real key or a placeholder -- and it is also why the output must not be piped
+into a file, pasted into a ticket, or attached to an issue.
+
+`--redact` prints only the type and location. That is all that is needed to go
+and fix it, and it is the mode to use anywhere the output might be stored.
+
 ## Secrets are not the only problem
 
 Grep separately for **internal identifiers**: hostnames, VPN addresses,
@@ -40,6 +51,12 @@ carried no credentials at all, but every commit contained operational
 documents with a VPN address, a real hostname and a hardware inventory. The
 fix was a clean snapshot with a new history, not a rewrite of the old one —
 the data was in every commit.
+
+**This scanner will not find any of that.** It looks for credentials, not
+topology. Both internal addresses caught in this project were found by a manual
+grep, not by the tool -- a sanitizing pass that replaced machine *names* left
+their *IP addresses* untouched in two files. A future `--internal` mode for
+private and VPN ranges, hostnames and network blocks would close that gap.
 
 Generated files deserve the same suspicion as configuration. A directory of
 machine-written notes held network topology and Wi-Fi credential terms. Version
