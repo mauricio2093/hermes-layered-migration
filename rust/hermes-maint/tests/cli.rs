@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicU32, Ordering};
 use hermes_maint_core::lock::Lock;
 use hermes_maint_core::paths::Paths;
 use hermes_maint_core::state::SCHEMA;
+use hermes_maint_core::tasks::backup_freshness::format_iso8601;
 
 const BIN: &str = env!("CARGO_BIN_EXE_hermes-maint");
 
@@ -45,6 +46,35 @@ impl TempHome {
     }
 }
 
+impl TempHome {
+    /// Evidence of a backup that passed every one of its own checks, dated
+    /// *age_seconds* ago. Without this, a fresh home has no backups at all and
+    /// every run is correctly partial -- which is a different test.
+    fn with_verified_backup(&self, age_seconds: i64) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let dir = self
+            .root
+            .join("backups")
+            .join("independiente")
+            .join("fixture");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("state.json"),
+            format!(
+                r#"{{"timestamp":"{}","backup":{{"created":true,
+                     "archive_integrity":true,"database_integrity":true,
+                     "manifest_integrity":true,"restore_verified":true}},
+                     "backup_verified":true}}"#,
+                format_iso8601(now - age_seconds)
+            ),
+        )
+        .unwrap();
+    }
+}
+
 impl Drop for TempHome {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.root);
@@ -60,6 +90,7 @@ fn code(out: &Output) -> i32 {
 #[test]
 fn a_plain_run_succeeds_and_leaves_state() {
     let home = TempHome::new("ok");
+    home.with_verified_backup(3600);
     let out = home.run(&["run"]);
     assert_eq!(code(&out), 0, "{}", String::from_utf8_lossy(&out.stderr));
     assert!(home.paths().state_file().exists());
@@ -68,6 +99,7 @@ fn a_plain_run_succeeds_and_leaves_state() {
 #[test]
 fn repeated_runs_accumulate_history_without_overlapping() {
     let home = TempHome::new("repeat");
+    home.with_verified_backup(3600);
     for _ in 0..3 {
         assert_eq!(code(&home.run(&["run", "--trigger", "timer"])), 0);
     }
@@ -162,4 +194,32 @@ fn nothing_in_the_build_talks_to_a_network() {
             "{forbidden} has no business in a maintenance binary"
         );
     }
+}
+
+/// A machine with no backups at all cannot have its backups checked, and the
+/// run says so rather than quietly passing.
+#[test]
+fn a_home_without_backups_is_partial_not_successful() {
+    let home = TempHome::new("nobackups");
+    let out = home.run(&["run", "--trigger", "timer"]);
+    assert_eq!(code(&out), 4, "{}", String::from_utf8_lossy(&out.stderr));
+
+    let body = std::fs::read_to_string(home.paths().state_file()).unwrap();
+    let state: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let tasks = state["history"][0]["tasks"].as_array().unwrap();
+    let backup = tasks
+        .iter()
+        .find(|t| t["id"] == "backup-freshness")
+        .expect("the task must have been attempted");
+    assert_eq!(backup["outcome"], "skipped");
+}
+
+/// A verified backup older than the threshold is the case this task exists
+/// for: everything ran, and the news is bad.
+#[test]
+fn a_stale_backup_makes_the_run_degraded() {
+    let home = TempHome::new("stale");
+    home.with_verified_backup(72 * 3600);
+    let out = home.run(&["run", "--trigger", "timer"]);
+    assert_eq!(code(&out), 6, "{}", String::from_utf8_lossy(&out.stderr));
 }

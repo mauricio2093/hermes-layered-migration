@@ -23,13 +23,20 @@ pub enum Observation {
     /// Looked, and something is not fine. **Reporting only** -- no task in
     /// this design acts on what it finds.
     Degraded(String),
+    /// Did not look, because the precondition for looking was absent.
+    ///
+    /// Distinct from `Degraded` on purpose: "there is no backup system on this
+    /// machine" is not an observation about backups, and reporting it as one
+    /// would be inventing a finding. Distinct from a `TaskError` too -- the
+    /// task worked exactly as intended; there was simply nothing to inspect.
+    Skipped(String),
 }
 
 impl Observation {
     #[must_use]
     pub fn detail(&self) -> &str {
         match self {
-            Observation::Ok(d) | Observation::Degraded(d) => d,
+            Observation::Ok(d) | Observation::Degraded(d) | Observation::Skipped(d) => d,
         }
     }
 }
@@ -69,11 +76,17 @@ pub trait Task {
 
 /// The built-in tasks, in the order they run.
 ///
+/// Cheap and local first: if the disk is full, that is worth seeing before
+/// anything that reads more files.
+///
 /// A compiled-in registry, not a configured one. Configuration may eventually
 /// enable, disable or re-time a task; it may **never** introduce a command
 /// string or a path, which closes the whole injection class rather than
 /// filtering it.
 #[must_use]
 pub fn registry() -> Vec<Box<dyn Task>> {
-    vec![Box::new(crate::tasks::disk_space::DiskSpace::default())]
+    vec![
+        Box::new(crate::tasks::disk_space::DiskSpace::default()),
+        Box::new(crate::tasks::backup_freshness::BackupFreshness::default()),
+    ]
 }

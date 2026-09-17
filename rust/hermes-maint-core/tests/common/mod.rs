@@ -27,6 +27,9 @@ impl TempHome {
         Self { root }
     }
 
+    // Each test binary compiles this module separately, so not every helper
+    // is used by every one of them.
+    #[allow(dead_code)]
     pub fn paths(&self) -> Paths {
         Paths::under(&self.root)
     }

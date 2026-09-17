@@ -24,7 +24,14 @@ close it
 exit with a defined code
 ```
 
-One task is registered: **`disk-space`**, which reads `statvfs(3)` directly.
+Two tasks are registered:
+
+- **`disk-space`** — reads `statvfs(3)` directly.
+- **`backup-freshness`** — age of the most recent backup whose own checks all
+  passed. It reads one JSON file per backup and never `mtime`, a directory
+  name or the presence of a `.tar.gz`; see
+  [`docs/task-backup-freshness.md`](../docs/task-backup-freshness.md).
+
 Tasks run in process — nothing spawns a child, enforces a deadline or signals
 a process group yet. That is the next slice, and it should not be debugged in
 the same commit as a task's arithmetic.

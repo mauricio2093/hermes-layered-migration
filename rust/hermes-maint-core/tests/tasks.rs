@@ -234,17 +234,35 @@ fn the_real_registry_runs_and_lands_in_state() {
     let paths = home.paths();
 
     let mut runner = Runner::start(paths.clone(), Trigger::Timer, false).expect("start");
-    runner.run_tasks(&registry());
-    let exit = runner.finish();
-    // This machine has plenty of room, so 0; on a full disk 6 would be
-    // correct too. Both are "it ran".
-    assert!(matches!(exit, Exit::Ok | Exit::Degraded), "{exit:?}");
+    let tasks = registry();
+    let ids: Vec<_> = tasks.iter().map(|t| t.id()).collect();
+    assert_eq!(
+        ids,
+        ["disk-space", "backup-freshness"],
+        "cheap and local first"
+    );
+    assert_eq!(
+        ids.iter().collect::<std::collections::HashSet<_>>().len(),
+        ids.len(),
+        "task ids are recorded in state, so they must be unique"
+    );
+
+    runner.run_tasks(&tasks);
+    // This throwaway home has no backups, so backup-freshness is skipped and
+    // the run is partial. That is the honest answer, not a failure.
+    assert_eq!(runner.finish(), Exit::Partial);
 
     let (state, _) = State::load(&paths).expect("load");
-    let task = &state.history[0].tasks[0];
-    assert_eq!(task.id, "disk-space");
-    assert_eq!(task.exit, None, "an in-process task has no exit status");
-    assert!(task.detail.as_ref().unwrap().contains("free of"));
+    let recorded: Vec<_> = state.history[0]
+        .tasks
+        .iter()
+        .map(|t| t.id.as_str())
+        .collect();
+    assert_eq!(recorded, ids, "every registered task ran, in order");
+
+    let disk = &state.history[0].tasks[0];
+    assert_eq!(disk.exit, None, "an in-process task has no exit status");
+    assert!(disk.detail.as_ref().unwrap().contains("free of"));
 }
 
 #[test]

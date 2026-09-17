@@ -224,6 +224,7 @@ impl Runner {
             let (outcome, detail) = match task.run(&ctx) {
                 Ok(Observation::Ok(d)) => (TaskOutcome::Ok, d),
                 Ok(Observation::Degraded(d)) => (TaskOutcome::Degraded, d),
+                Ok(Observation::Skipped(d)) => (TaskOutcome::Skipped, d),
                 Err(e) => (TaskOutcome::Failed, e.to_string()),
             };
             let duration_s = started.elapsed().as_secs();
@@ -231,7 +232,9 @@ impl Runner {
 
             match outcome {
                 TaskOutcome::Ok => crate::info!("{}: {detail}", task.id()),
-                TaskOutcome::Degraded => crate::warn!("{}: {detail}", task.id()),
+                TaskOutcome::Degraded | TaskOutcome::Skipped => {
+                    crate::warn!("{}: {detail}", task.id());
+                }
                 _ => crate::error!("{}: {detail}", task.id()),
             }
 
