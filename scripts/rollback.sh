@@ -58,6 +58,13 @@ src.backup(dst); dst.close(); src.close()
 PY
 }
 
+service_stopped() {  # true solo si systemd lo da por inactivo Y no queda PID
+  local st pid
+  st="$(systemctl --user is-active "$SERVICE" 2>/dev/null)"
+  pid="$(systemctl --user show "$SERVICE" -p MainPID --value 2>/dev/null)"
+  [ "$st" != "active" ] && [ "$st" != "activating" ] && { [ -z "$pid" ] || [ "$pid" = "0" ]; }
+}
+
 say "════════════════════════════════════════════"
 say "Rollback mode: $(echo "$MODE" | tr a-z A-Z)$([ "$DRY" = 1 ] && echo '  (DRY-RUN)')"
 say "════════════════════════════════════════════"
@@ -111,8 +118,13 @@ fi
 
 # ── 3. material para deshacer ESTE rollback ────────────────────────────
 say; say "── 3. material de recuperacion (volver a 0.21.3) ──"
-run cp "$UNIT" "$OUT/unit-actual.service"
-run cp "$HOME_DIR/config.yaml" "$OUT/config-actual.yaml"
+if [ "$DRY" = 1 ]; then
+  say "   [dry-run] cp $UNIT -> $OUT/unit-actual.service"
+  say "   [dry-run] cp $HOME_DIR/config.yaml -> $OUT/config-actual.yaml"
+else
+  cp "$UNIT" "$OUT/unit-actual.service" || die "sin material de recuperacion: no se pudo copiar la unit"
+  cp "$HOME_DIR/config.yaml" "$OUT/config-actual.yaml" || die "sin material de recuperacion: no se pudo copiar config.yaml"
+fi
 if [ "$DRY" = 0 ]; then
   { echo "rollback_ts=$TS"; echo "mode=$MODE"; echo "db_schema_before=$cur_v";
     echo "unit_before=$OUT/unit-actual.service"; echo "config_before=$OUT/config-actual.yaml";
@@ -123,14 +135,26 @@ say "     volver a 0.21.3: cp \$unit_before \"$UNIT\" && systemctl --user daemon
 
 # ── 4. parar escritores (obligatorio si se sustituye la DB) ────────────
 say; say "── 4. detener el servicio ──"
-run systemctl --user stop "$SERVICE"
-[ "$DRY" = 0 ] && sleep 3
-say "   ✓ $SERVICE detenido"
+if [ "$DRY" = 1 ]; then
+  say "   [dry-run] systemctl --user stop $SERVICE"
+else
+  systemctl --user stop "$SERVICE" || die "no se pudo detener $SERVICE; la DB NO se ha tocado"
+  # Un stop que devuelve 0 no garantiza que el proceso haya muerto: se espera y
+  # se comprueba. Sustituir la DB con un escritor vivo la corrompe.
+  for _ in 1 2 3 4 5 6 7 8 9 10; do service_stopped && break; sleep 1; done
+  service_stopped || die "$SERVICE sigue vivo tras 10s; la DB NO se ha tocado"
+  say "   ✓ $SERVICE detenido y verificado"
+fi
 
 # ── 5. restaurar codigo / unit ─────────────────────────────────────────
 say; say "── 5. restaurar unit del fosil ──"
-run cp -p "$UNIT_FOSSIL" "$UNIT"
-run systemctl --user daemon-reload
+if [ "$DRY" = 1 ]; then
+  say "   [dry-run] cp -p $UNIT_FOSSIL -> $UNIT"
+  say "   [dry-run] systemctl --user daemon-reload"
+else
+  cp -p "$UNIT_FOSSIL" "$UNIT" || die "no se pudo restaurar la unit del fosil"
+  systemctl --user daemon-reload || die "daemon-reload fallo; la unit quedo escrita pero no cargada"
+fi
 say "   ✓ unit restaurada (codigo 0.21.3 -> 0.20.1)"
 
 # ── 6. base de datos ───────────────────────────────────────────────────
@@ -147,7 +171,8 @@ else
     mv "$LIVE_DB" "$OUT/state-desplazada-$TS.db" || die "no se pudo desplazar la DB actual"
     rm -f "$LIVE_DB-wal" "$LIVE_DB-shm"
     snapshot_db "$BACKUP_DB" "$LIVE_DB" || die "no se pudo restaurar la DB destino"
-    chmod "$PERMS" "$LIVE_DB"; chown "$OWNER" "$LIVE_DB" 2>/dev/null || true
+    chmod "$PERMS" "$LIVE_DB" || die "no se pudieron restaurar los permisos de la DB"
+    chown "$OWNER" "$LIVE_DB" 2>/dev/null || true   # sin privilegios es normal; el modo ya esta puesto
     r="$(sqlite_meta "$LIVE_DB")"; r_v="${r%%|*}"; r_i="$(echo "$r" | cut -d'|' -f2)"
     [ "$r_i" = "ok" ]           || die "DB restaurada corrupta: $r_i"
     [ "$r_v" = "$EXPECT_TARGET" ] || die "DB restaurada en schema $r_v, se esperaba $EXPECT_TARGET"
@@ -157,8 +182,12 @@ fi
 
 # ── 7. arrancar y comprobar ────────────────────────────────────────────
 say; say "── 7. arrancar y health check ──"
-run systemctl --user start "$SERVICE"
-[ "$DRY" = 0 ] && sleep 10
+if [ "$DRY" = 1 ]; then
+  say "   [dry-run] systemctl --user start $SERVICE"
+else
+  systemctl --user start "$SERVICE" || say "   ✗ start fallo; se conserva todo en $OUT"
+  sleep 10
+fi
 if [ "$DRY" = 1 ]; then
   say "   [dry-run] health check"
   ACTIVE="(dry-run)"; HEALTH="(dry-run)"
