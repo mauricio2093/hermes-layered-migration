@@ -66,6 +66,7 @@ function rather than by whatever label they shipped under.
 | [`docs/layers.md`](docs/layers.md) | The three-layer model |
 | [`docs/secret-scanning.md`](docs/secret-scanning.md) | Scanning before a remote exists |
 | [`docs/runbook-live-cutover.md`](docs/runbook-live-cutover.md) | Swapping a live gateway, with rollback |
+| [`hermes_layer2/`](hermes_layer2/) | The layer-2 code itself: schema versioning and adaptive command ranking |
 | [`manifests/compatibility.yaml`](manifests/compatibility.yaml) | Which group was validated against which version |
 | [`patches/telegram/`](patches/telegram/) | A worked example: two features ported to a 35k-commit-newer upstream |
 
@@ -112,6 +113,37 @@ it — and it has, twice, including a sixth database nobody knew existed.
 Full account in [docs/verification.md](docs/verification.md).
 
 ---
+
+## What layer 2 looks like in practice
+
+[`hermes_layer2/`](hermes_layer2/) is the worked example: it adds a feature to
+Hermes while touching almost nothing of it.
+
+**Its own schema line.** Upstream owns `schema_version`; taking a number from it
+would mean that the day upstream ships its own next version, two different
+schemas share one number. So layer 2 versions itself, per component, in the same
+database — no second database, no loose JSON file.
+
+**Migrations that cannot half-apply.** DDL and the version bump commit or roll
+back together. Otherwise a crash between them leaves a table whose recorded
+version says it does not exist.
+
+**An adaptive slash menu**, as the first consumer. Commands are ordered by
+frequency *and* recency: the score decays exponentially with a 30-day half-life,
+and — the part that is easy to get wrong — **it decays on read as well as on
+write**. Decaying only on use leaves an abandoned command frozen at its old
+score forever, because nothing ever touches its row again. A command used 100
+times and then ignored for six months reads as ~1.6, and loses to one used 41
+times last week.
+
+**Learning is fast; publishing is slow.** On a chat platform the menu is set
+through an API, so the trigger is the rendered payload — the exact commands and
+descriptions in order — never the scores behind it. A measured burst: 100
+executions produce 100 writes, 10 recomputations and **one** API call.
+
+**Fail-open everywhere.** An adaptive menu is a convenience. A missing or
+corrupt database returns the original order and records nothing; it must never
+be the reason a command does not run.
 
 ## Automation, and where it must stop
 
