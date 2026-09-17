@@ -1,0 +1,16 @@
+[package]
+name = "hermes-maint-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Lock, state and run lifecycle for hermes-maint. No tasks, no network, no Hermes internals."
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+libc.workspace = true
+serde_json.workspace = true

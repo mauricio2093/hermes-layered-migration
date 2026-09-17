@@ -1,0 +1,18 @@
+[package]
+name = "hermes-maint"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+description = "Scheduled maintenance for a Hermes install. Runs once, reports, exits."
+
+[[bin]]
+name = "hermes-maint"
+path = "src/main.rs"
+
+[dependencies]
+hermes-maint-core = { path = "../hermes-maint-core" }
+
+[dev-dependencies]
+hermes-maint-core = { path = "../hermes-maint-core" }
+serde_json.workspace = true

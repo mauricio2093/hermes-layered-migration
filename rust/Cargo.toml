@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["hermes-maint-core", "hermes-maint"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "MIT"
+
+# Dependencies are kept to three, all of them boring on purpose. A maintenance
+# tool that runs unattended at 03:00 should have a supply chain a person can
+# actually read.
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+libc = "0.2"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

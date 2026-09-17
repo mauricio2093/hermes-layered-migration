@@ -10,3 +10,7 @@ __pycache__/
 *.py[cod]
 .venv/
 venv/
+
+# Rust build output. Cargo.lock IS committed: an unattended maintenance
+# binary should build from the same dependency versions every time.
+rust/target/
