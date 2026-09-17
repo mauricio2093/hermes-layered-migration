@@ -13,6 +13,7 @@ fn task(id: &str, outcome: TaskOutcome) -> TaskResult {
         outcome,
         exit: Some(0),
         duration_s: 1,
+        detail: None,
     }
 }
 

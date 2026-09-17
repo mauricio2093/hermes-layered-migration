@@ -104,7 +104,7 @@ fn a_held_lock_exits_three() {
 }
 
 #[test]
-fn state_from_a_newer_version_exits_two_and_is_preserved() {
+fn state_from_a_newer_version_exits_seven_and_is_preserved() {
     let home = TempHome::new("future");
     let paths = home.paths();
     paths.ensure_dir().unwrap();
@@ -112,7 +112,11 @@ fn state_from_a_newer_version_exits_two_and_is_preserved() {
     std::fs::write(paths.state_file(), &planted).unwrap();
 
     let out = home.run(&["run"]);
-    assert_eq!(code(&out), 2);
+    assert_eq!(
+        code(&out),
+        7,
+        "incompatible state gets its own code: it is not a typo at the prompt"
+    );
     assert_eq!(
         std::fs::read_to_string(paths.state_file()).unwrap(),
         planted,

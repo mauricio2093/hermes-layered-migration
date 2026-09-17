@@ -83,10 +83,30 @@ pub enum TaskOutcome {
 pub struct TaskResult {
     pub id: String,
     pub outcome: TaskOutcome,
-    /// The child's exit status, when it ran far enough to have one.
+    /// The child's exit status, when it ran far enough to have one. In-process
+    /// tasks have none.
     #[serde(default)]
     pub exit: Option<i32>,
     pub duration_s: u64,
+    /// A short human summary of what the task saw. Truncated on the way in:
+    /// state that grows with whatever a task felt like saying is a disk
+    /// problem waiting to happen.
+    #[serde(default)]
+    pub detail: Option<String>,
+}
+
+/// Longest detail kept in state. Enough for a sentence, far short of a log.
+pub const MAX_DETAIL_CHARS: usize = 240;
+
+/// Trim a detail to [`MAX_DETAIL_CHARS`], on a character boundary.
+#[must_use]
+pub fn clamp_detail(detail: &str) -> String {
+    let trimmed = detail.trim();
+    if trimmed.chars().count() <= MAX_DETAIL_CHARS {
+        return trimmed.to_string();
+    }
+    let kept: String = trimmed.chars().take(MAX_DETAIL_CHARS - 1).collect();
+    format!("{kept}…")
 }
 
 /// One run.

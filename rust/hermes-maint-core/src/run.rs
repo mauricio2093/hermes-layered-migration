@@ -10,7 +10,8 @@ use std::fmt;
 use crate::exit::Exit;
 use crate::lock::{Lock, LockError};
 use crate::paths::Paths;
-use crate::state::{LoadError, Origin, Outcome, Run, State, TaskOutcome, TaskResult};
+use crate::state::{clamp_detail, LoadError, Origin, Outcome, Run, State, TaskOutcome, TaskResult};
+use crate::task::{Observation, Task, TaskContext};
 
 /// What started this run. An allowlist, not free text: the value is recorded
 /// in state and shown in reports, and unvalidated input has no business there.
@@ -53,8 +54,11 @@ impl fmt::Display for Trigger {
 pub enum StartError {
     /// Another run holds the lock. Not a failure.
     LockBusy,
-    /// State from a newer version, or arguments that do not make sense.
+    /// Arguments that do not make sense.
     Misuse(String),
+    /// The state file was written by a newer build. Its own code (7), because
+    /// it is not a mistake the caller made at the command line.
+    IncompatibleState(String),
     /// Something under us broke.
     Io(std::io::Error),
 }
@@ -65,6 +69,7 @@ impl StartError {
         match self {
             StartError::LockBusy => Exit::LockBusy,
             StartError::Misuse(_) => Exit::Misuse,
+            StartError::IncompatibleState(_) => Exit::IncompatibleState,
             StartError::Io(_) => Exit::Internal,
         }
     }
@@ -74,7 +79,7 @@ impl fmt::Display for StartError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             StartError::LockBusy => f.write_str("another run is already in progress"),
-            StartError::Misuse(m) => f.write_str(m),
+            StartError::Misuse(m) | StartError::IncompatibleState(m) => f.write_str(m),
             StartError::Io(e) => write!(f, "{e}"),
         }
     }
@@ -129,7 +134,7 @@ impl Runner {
         }
 
         let (mut state, origin) = State::load(&paths).map_err(|e| match e {
-            LoadError::FutureSchema { .. } => StartError::Misuse(e.to_string()),
+            LoadError::FutureSchema { .. } => StartError::IncompatibleState(e.to_string()),
             LoadError::Io(io) => StartError::Io(io),
         })?;
 
@@ -184,11 +189,62 @@ impl Runner {
         })
     }
 
-    /// Record a finished task. Nothing calls this yet -- the registry is empty
-    /// -- but the outcome arithmetic below is what it feeds, and that is worth
-    /// having settled and tested before the first real task arrives.
+    /// Record a finished task.
     pub fn record_task(&mut self, result: TaskResult) {
         self.run.tasks.push(result);
+    }
+
+    /// Run every task in order, recording each result.
+    ///
+    /// Sequential on purpose: the tasks are I/O-bound against the same disk on
+    /// a 6 GB machine, so concurrency would buy nothing and would make the
+    /// ordering, the failure semantics and -- once deadlines exist -- the
+    /// timeout accounting harder to reason about.
+    ///
+    /// **A failing task does not abort the run.** The other observations are
+    /// independent and still wanted; losing four because the fifth broke would
+    /// be the wrong trade at 03:00.
+    pub fn run_tasks(&mut self, tasks: &[Box<dyn Task>]) {
+        if self.dry_run {
+            for task in tasks {
+                crate::info!("dry-run: would run {} -- {}", task.id(), task.describe());
+            }
+            if tasks.is_empty() {
+                crate::info!("dry-run: no tasks registered");
+            }
+            return;
+        }
+
+        // Cloned so the context's borrow does not collide with recording
+        // results into `self` inside the loop.
+        let paths = self.paths.clone();
+        let ctx = TaskContext { paths: &paths };
+        for task in tasks {
+            let started = std::time::Instant::now();
+            let (outcome, detail) = match task.run(&ctx) {
+                Ok(Observation::Ok(d)) => (TaskOutcome::Ok, d),
+                Ok(Observation::Degraded(d)) => (TaskOutcome::Degraded, d),
+                Err(e) => (TaskOutcome::Failed, e.to_string()),
+            };
+            let duration_s = started.elapsed().as_secs();
+            let detail = clamp_detail(&detail);
+
+            match outcome {
+                TaskOutcome::Ok => crate::info!("{}: {detail}", task.id()),
+                TaskOutcome::Degraded => crate::warn!("{}: {detail}", task.id()),
+                _ => crate::error!("{}: {detail}", task.id()),
+            }
+
+            self.record_task(TaskResult {
+                id: task.id().to_string(),
+                outcome,
+                // In-process tasks have no exit status. When the child
+                // supervisor lands, that is where this gets filled in.
+                exit: None,
+                duration_s,
+                detail: Some(detail),
+            });
+        }
     }
 
     #[must_use]

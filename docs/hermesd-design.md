@@ -216,8 +216,27 @@ small, and it costs one JSON file to keep sovereign.
   treated as "no previous state" — never silently overwritten, never fatal.
 - **Bounded history**: a fixed number of entries. A state file that grows
   without bound is a slow-motion disk failure.
-- **No secrets.** Task ids, exit codes, durations, timestamps. Not command
-  output, not environment, not paths outside `~/.hermes`.
+- **No secrets.** Task ids, exit codes, durations, timestamps, and a short
+  bounded summary of what a task observed. Not command output, not
+  environment, not paths outside `~/.hermes`.
+
+### 3.3 The state directory must be on a local filesystem
+
+Everything proven about the lock and the state file assumes local Linux
+filesystem semantics:
+
+- `flock` behaviour across processes, and its release when a descriptor closes;
+- `rename` being atomic within the directory;
+- `fsync` on a file and on a directory meaning what it says.
+
+**On NFS or CIFS, none of these can be assumed.** `flock` may be emulated,
+silently local to one client, or mapped onto POSIX locks with different
+semantics; `fsync` durability depends on the server and the mount options.
+
+So: `HERMES_HOME` -- and therefore `~/.hermes/hermes-maint/` -- lives on a
+local filesystem. If that ever stops being true, the guarantees in this
+document have to be re-derived rather than assumed, and the single-instance
+lock is the first thing that would need rethinking.
 
 ---
 
@@ -377,9 +396,15 @@ Every scenario requested, with the decided behaviour.
 4  partial — at least one task failed or was skipped
 5  timeout — at least one task was killed on its deadline
 6  degraded — all tasks ran, a health check reports degraded
+7  incompatible-state — the state file was written by a newer build
 ```
 
 Distinguishable codes, so the journal is queryable without parsing prose.
+
+**7 is separate from 2 on purpose.** "You ran an old binary against newer
+state" and "you mistyped `--trigger`" are different problems with different
+fixes, and collapsing them into one code would waste exactly the property
+these codes exist for.
 
 ---
 
@@ -586,17 +611,30 @@ Properties that make this true, and which constrain the implementation:
 
 ---
 
+## 13.1 Order of the first tasks
+
+Not arbitrary. Each step is chosen to introduce **one** new thing.
+
+| # | Task | What it introduces | Why here |
+|---|---|---|---|
+| 1 | **`disk-space`** | the task registry, `Observation`, `TaskResult`, run outcome, exit 0/6 | Read-only, knows nothing about Hermes, no database, no privileges, no network, and essentially no destructive way to fail. It reads `statvfs(3)` directly rather than running `df`, so the first task introduces **no subprocess at all**. |
+| 2 | **`backup-freshness`** | judgement about someone else's artifacts | Deliberately second, because it forces decisions `disk-space` never needs: which directory is authoritative, what counts as a valid backup, whether the date comes from the name or the metadata, how a complete backup is told apart from a half-written one, and what "too old" means. And it must rest on **evidence of a verified backup**, not on `mtime` — this project has already paid for the difference between "a recent backup exists" and "a restorable backup exists". |
+| 3 | **child-process supervisor** | spawning, process groups, `SIGTERM`/`SIGKILL` escalation, deadlines | Its own slice, exercised against a deliberately harmless external command. Bundling it with a first task would mean debugging arithmetic and signal escalation in the same commit. |
+| 4 | **a task that runs an existing script** | the real thing | Only once the supervisor is proven. |
+
 ## 14. What happens next
 
 In order, and not before the boundary above is accepted:
 
 1. Install a Rust toolchain (there is none on this host yet).
 2. `cargo new` — a workspace with `hermes-maint-core` and `hermes-maint`.
-3. Lock, state and dry-run first, with tests, and **no tasks at all**.
-4. One real task, chosen for being read-only and boring.
-5. The units, verified with `systemd-analyze verify`.
-6. Run it by hand, repeatedly, before letting the timer own it.
-7. Only then, 03:00.
+3. Lock, state and dry-run first, with tests, and **no tasks at all**. *(done
+   — `v0.16.0-hermes-maint-slice1`)*
+4. One real task, chosen for being read-only and boring: `disk-space`. *(done)*
+5. The remaining tasks, in the order set out in §13.1.
+6. The units, verified with `systemd-analyze verify`.
+7. Run it by hand, repeatedly, before letting the timer own it.
+8. Only then, 03:00.
 
-The first commit should be able to do nothing useful and still be correct. That
-is the point.
+The first commit was able to do nothing useful and still be correct. That was
+the point.

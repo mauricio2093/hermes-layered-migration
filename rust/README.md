@@ -12,20 +12,22 @@ hermes-maint-core/   lock, state, run lifecycle
 hermes-maint/        binary: parse arguments, run once, exit
 ```
 
-## What this slice does
+## What it does
 
 ```
 acquire a single-instance lock
 load and reconcile its own state
 open a run
+run the registered tasks
 close it
 --dry-run
 exit with a defined code
 ```
 
-**No tasks are registered.** A run opens and closes with nothing in between.
-That is deliberate: the lock, the reconciliation and the persistence are much
-easier to prove correct while there is no real work to confuse them with.
+One task is registered: **`disk-space`**, which reads `statvfs(3)` directly.
+Tasks run in process — nothing spawns a child, enforces a deadline or signals
+a process group yet. That is the next slice, and it should not be debugged in
+the same commit as a task's arithmetic.
 
 It opens no socket, makes no network call, needs no privileges, and never
 touches Hermes' own `state.db`.
@@ -40,7 +42,11 @@ touches Hermes' own `state.db`.
 4  partial — a task failed or was skipped
 5  timeout — a task was killed on its deadline
 6  degraded — everything ran, a health check reports degraded
+7  incompatible-state — state written by a newer build
 ```
+
+7 is separate from 2 because "old binary, new state" and "you mistyped
+`--trigger`" are different problems with different fixes.
 
 Exit 3 is why the unit declares `SuccessExitStatus=3`: a lock doing its job
 must never appear in `systemctl --failed`.

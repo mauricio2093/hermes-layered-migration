@@ -20,6 +20,7 @@ fn closed_run(id: u64) -> Run {
             outcome: TaskOutcome::Ok,
             exit: Some(0),
             duration_s: 3,
+            detail: Some("example detail".into()),
         }],
     }
 }

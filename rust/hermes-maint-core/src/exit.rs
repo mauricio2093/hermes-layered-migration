@@ -22,6 +22,11 @@ pub enum Exit {
     Timeout = 5,
     /// Everything ran; a health check reports degraded.
     Degraded = 6,
+    /// The state file was written by a newer build. Distinct from `Misuse`
+    /// on purpose: "you ran an old binary against new state" is a different
+    /// problem from "you mistyped `--trigger`", and the whole reason these
+    /// codes exist is to tell such things apart without parsing prose.
+    IncompatibleState = 7,
 }
 
 impl Exit {
@@ -42,6 +47,7 @@ impl Exit {
             Exit::Partial => "partial",
             Exit::Timeout => "timeout",
             Exit::Degraded => "degraded",
+            Exit::IncompatibleState => "incompatible-state",
         }
     }
 }

@@ -3,10 +3,8 @@
 //! Runs once, reports, exits. It is not a daemon: `systemd.timer` owns the
 //! schedule, which is why there is no scheduler in here and never should be.
 //!
-//! This slice registers **no tasks**. It can take the lock, reconcile its own
-//! state, open a run, close it, do a dry-run, and exit with a defined code.
-//! Nothing else. The point of a first binary that is almost useless is that
-//! "almost useless" is small enough to get completely right.
+//! Tasks are read-only observations. Nothing here stops, starts or restarts a
+//! service, and nothing spawns a child process yet.
 
 use std::process::ExitCode;
 
@@ -21,19 +19,22 @@ USAGE:
 
 OPTIONS:
     --trigger <timer|manual>   what started this run (default: manual)
-    --dry-run                  report what a real run would do, write nothing
+    --dry-run                  report what a real run would do; runs no task
+                               and writes no state
     -h, --help                 this text
     -V, --version              version
 
 EXIT CODES:
     0  ok
     1  internal error
-    2  misuse -- bad arguments, or state written by a newer version
+    2  misuse -- bad arguments
     3  lock busy -- another run holds it (NOT a failure; the unit declares
        SuccessExitStatus=3 so a working lock never reaches `systemctl --failed`)
     4  partial -- a task failed or was skipped
     5  timeout -- a task was killed on its deadline
     6  degraded -- everything ran, a health check reports degraded
+    7  incompatible-state -- state written by a newer build. Distinct from 2:
+       running an old binary against new state is not a typo at the prompt.
 
 NOTE:
     --dry-run still takes the lock, because a dry-run that read state while a
@@ -84,9 +85,10 @@ fn run(trigger: Trigger, dry_run: bool) -> Exit {
             eprintln!("error: {e}");
             e.exit()
         }
-        // No tasks are registered, so a run opens and closes with nothing in
-        // between. When the first task arrives it goes here, and only here.
-        Ok(runner) => runner.finish(),
+        Ok(mut runner) => {
+            runner.run_tasks(&hermes_maint_core::task::registry());
+            runner.finish()
+        }
     }
 }
 
