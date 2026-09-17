@@ -1,15 +1,25 @@
-# hermesd — design before code
+# hermes-maint — design before code
 
-Nothing here is implemented. No Rust exists, no crate has been created. This
-document exists to close the boundary of the first slice **before** `cargo new`,
+This document closed the boundary of the first slice **before** `cargo new`,
 because the cheapest time to delete a responsibility is while it is still a
 paragraph.
 
+**Status: approved.** The architecture below is decided, not proposed:
+
 ```
-Rust implemented:      0
-hermesd implemented:   0
-toolchain installed:   0     (rustc/cargo are not on this machine yet)
+systemd.timer
+    ↓
+hermes-maint          binary: runs once, exits
+    ↓
+hermes-maint-core     library: lock, state, supervision
+    ↓
+registered maintenance tasks
+    ↓
+exit
 ```
+
+`hermesd` is not being built. The name is reserved for a future phase with a
+real need for residency or events; see §1.1.
 
 ---
 
@@ -53,17 +63,17 @@ hermes-maint  (Rust, runs, reports, exits)
 existing scripts in ~/.hermes/scripts/
 ```
 
-**Recommendation: option B — a timer waking a short-lived binary.**
+**Decided: option B — a timer waking a short-lived binary.**
 
-### 1.1 On the name
+### 1.1 The name — decided
 
 If it is not resident, calling it `hermesd` is inaccurate, and inaccurate names
 cost real time two years later when someone looks for a running process that was
-never there. Proposal:
+never there.
 
-- **binary: `hermes-maint`** — what the first slice actually is.
-- **`hermesd` stays reserved** for the day residency is *earned* by a
-  requirement, not assumed by a filename.
+- **binary: `hermes-maint`** — what this actually is.
+- **`hermesd` is reserved** for a future phase in which a real need for
+  residency or event handling exists. Not earned yet, so not used yet.
 
 The internal crate layout makes the rename a deployment change, not a rewrite:
 
@@ -123,16 +133,29 @@ Absent all three, B stays.
 **One file. Not a database. Not `state.db`.**
 
 ```
-~/.hermes/hermesd/
+~/.hermes/hermes-maint/
 ├── state.json        last-run state, atomically replaced
 ├── lock              flock target, empty content is fine
 └── reports/          one report per run, rotated by count
 ```
 
 `state.db` ownership is explicitly out of scope. The Rust binary **never opens
-it** — not read, not write, not to check a schema version. The Python side owns
-it, and a second writer with a different concurrency model is how databases get
-corrupted.
+it** — not read, not write, not to check a schema version.
+
+The reason is ownership, not fear of corruption. A single reader would not
+corrupt anything, and SQLite handles multiple writers perfectly well. The point
+is that `state.db` **belongs to Hermes**, and the moment `hermes-maint` opens it
+it acquires a dependency on things it does not control:
+
+- its **schema**, which upstream changes when it likes;
+- its **migrations**, which would have to be understood and tolerated;
+- its **locking** and journal mode;
+- its **lifecycle** — when it is created, moved, restored or replaced;
+- its **future compatibility**, forever.
+
+That is a standing coupling to another project's internals in exchange for
+nothing. The operational state of maintenance is a domain of its own, it is
+small, and it costs one JSON file to keep sovereign.
 
 ### 3.1 Shape
 
@@ -156,9 +179,35 @@ corrupted.
 
 ### 3.2 Rules
 
-- **Atomic write**: serialise to `state.json.tmp`, `fsync` the file, `rename`,
-  `fsync` the directory. A crash mid-write leaves the previous state intact,
-  never a truncated one.
+- **Atomic write.** The full sequence, because skipping any step of it is how
+  "atomic" writes turn out not to be:
+
+  ```
+  1. create a temp file in the SAME directory   (same filesystem — rename()
+                                                 is only atomic within one)
+  2. write the serialised state to it
+  3. flush + fsync the temp file                (data on disk, not in cache)
+  4. rename(temp, state.json)                   (atomic replacement)
+  5. fsync the directory                        (the rename itself durable)
+  ```
+
+  Restrictive permissions throughout: the file is created `0600` and the
+  directory is `0700`, so the temp file is never briefly world-readable.
+
+  The guarantee this buys, after a crash or a power loss at **any** point:
+
+  ```
+  state.json = the previous complete version
+          or
+  state.json = the new complete version
+
+  never a partial write
+  ```
+
+  Step 3 is what makes it true rather than probably true — a rename is atomic
+  with respect to the directory, but without the fsync the file's *contents*
+  may still be in page cache, and a power loss can land the new name on top of
+  empty blocks. Step 5 is what makes the rename itself survive.
 - **Own schema number**, starting at 1. It has nothing to do with upstream
   `SCHEMA_VERSION` and never will. (The layer-2 work already established this
   rule; the same reasoning applies.)
@@ -175,7 +224,7 @@ corrupted.
 ## 4. Lock
 
 ```
-flock(~/.hermes/hermesd/lock, LOCK_EX | LOCK_NB)
+flock(~/.hermes/hermes-maint/lock, LOCK_EX | LOCK_NB)
 ```
 
 Held for the entire run, released by the kernel on exit — including on
@@ -189,6 +238,13 @@ a diagnostic, and are never consulted to decide whether the lock is held.
 
 **Lock busy is not an error.** Another run is already doing the work; that is
 the lock functioning. Exit 3, log one line, do not alarm.
+
+This has to be declared to systemd as well, or the exit code is only half the
+decision: the unit sets **`SuccessExitStatus=3`**. Without it, every contended
+run would leave a failed unit behind, and `systemctl --failed` — the one place
+a human looks to find out whether anything is wrong — would fill up with
+evidence that everything is working. A monitoring surface that cries wolf gets
+ignored, and then it is worth nothing on the night it is right.
 
 `flock` is advisory and per-file-description, so the rule is absolute: **every**
 entry point — timer, manual, dry-run — takes the lock. Dry-run included, because
@@ -307,7 +363,7 @@ Every scenario requested, with the decided behaviour.
 | **Timeout** | SIGTERM → grace → SIGKILL to the process group. Task recorded `timeout`, exit 5. Run continues. Nothing is left running. |
 | **The Rust process dies** (crash, OOM, SIGKILL) | Kernel releases the flock; no stale lock. `state.json` is either the previous run's or the new one's, never half-written. The next timer firing starts clean. Partial work done by children is whatever those scripts' own idempotence guarantees — which is why they, not the parent, own that property. |
 | **Reboot mid-task** | Same as above, plus: `Persistent=true` makes the timer fire shortly after boot if the window was missed. On start, if `state.json` has a `started_at` with no `finished_at`, the previous run is recorded as `interrupted` and the new run proceeds. It does not attempt to resume — resuming a half-finished backup is worse than starting one. |
-| **Lock busy** | Exit 3, one log line, no report, no state change, no alert. Success from systemd's point of view (`SuccessExitStatus=3`). |
+| **Lock busy** | Exit 3, one log line, no report, no state change, no alert. The unit declares `SuccessExitStatus=3`, so systemd records it as a **normal termination**: a correctly working lock must never appear in `systemctl --failed`. |
 | **Script missing** | Caught by pre-flight §5.2. Task recorded `skipped` with a reason. The run continues and exits 4 (partial). A missing maintenance script is a real problem that must be visible — but it is not a reason to skip the other tasks. |
 | **Insufficient permissions** | Same path: pre-flight fails, task `skipped` with the specific reason (not owned / writable by others / not executable). Never "retry with sudo". There is no sudo path in this design (§10). |
 
@@ -346,6 +402,18 @@ RandomizedDelaySec=300
 Persistent=true
 AccuracySec=1m
 ```
+
+**Missed-run policy, stated explicitly:** if the 03:00 run is missed because the
+machine was powered off, `Persistent=true` makes systemd run it **at the next
+boot**, as soon as the timer unit starts. For this slice that is the desired
+behaviour, not a side effect — the tasks are observations and a late observation
+is still worth having. `RandomizedDelaySec` applies to the catch-up run too, so
+it does not land in the middle of the boot storm.
+
+This is a policy that a later slice may need to revisit: a task that is only
+meaningful inside its window (or one that is expensive enough to hurt a machine
+that has just booted) would want `Persistent=false` or its own freshness check.
+No such task exists yet.
 
 `Persistent=true` covers the machine being off at 03:00. `RandomizedDelaySec`
 is cheap insurance against every scheduled thing on the box starting at
@@ -500,7 +568,7 @@ rm ~/.config/systemd/user/hermes-maint.timer
 rm ~/.config/systemd/user/hermes-maint.service
 systemctl --user daemon-reload
 rm ~/.local/bin/hermes-maint
-rm -rf ~/.hermes/hermesd/          # state, lock, reports
+rm -rf ~/.hermes/hermes-maint/          # state, lock, reports
 ```
 
 Properties that make this true, and which constrain the implementation:
