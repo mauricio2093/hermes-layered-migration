@@ -43,12 +43,20 @@ Run twice — against its own fixtures, then with the environment pointed at the
 v30 copy:
 
 ```
-baseline          381 passed, 1 failed
-on the v30 copy   381 passed, 1 failed   ← identical
+baseline                       381 passed, 1 failed
+with the environment repointed 381 passed, 1 failed   ← identical
 ```
 
 The single failure is pre-existing and unrelated: a full-text search projection
 test that fails on the release's own fixtures too. **It is not a v30 symptom.**
+
+**Read this result narrowly.** It shows no observable regression from
+repointing the environment. It does **not** show that 382 tests each opened the
+v30 copy — most build their own temporary fixtures, and which database each one
+opened was not verified. Treat it as a regression guard, not as v30 coverage.
+
+The decisive evidence is the direct battery above: 8 of 8 operations against
+the v30 copy, with the writes landing in it and read back.
 
 The live database was untouched throughout: unchanged modification time,
 `schema_version` still 30.
