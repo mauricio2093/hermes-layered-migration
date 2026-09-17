@@ -70,6 +70,48 @@ Upstream's `SCHEMA_VERSION` stays at 30 and no number was taken from it. Layer 2
 counts separately, per component, so upstream can advance to 31 and beyond with
 no collision.
 
+## Security posture — stated precisely
+
+Vague wording here is worse than none, so the two axes are separated.
+
+**HEAD of both public repositories:** no credentials, no private or VPN
+addresses, no personal home paths, no non-noreply e-mail, no wireless
+credentials.
+
+**History of both public repositories:** the same, **except** three
+low-sensitivity identifiers — a laptop brand, a CPU model and a first name —
+which remain in three commits of the router repository and are documented
+below. They are not credentials and grant no access.
+
+**The two VPN addresses found during this pass were never in either public
+repository.** They lived in a private configuration repository that has no
+remote and was never published; its HEAD is now parameterised too. An earlier
+summary conflated the two, which is the kind of ambiguity that makes a clean
+report useless.
+
+### Known limits of the scanning
+
+The scanner looks for credentials, not topology. Both of those addresses were
+found by a manual grep, not by the tool. An `--internal` mode for private and
+VPN ranges, hostnames and network blocks would close that gap and does not
+exist yet.
+
+No `pip-audit` or `osv-scanner` was available, so the dependency review was
+manual: advisories were checked by reading, and reachability was confirmed by
+inspecting which APIs the code actually calls. That is weaker than a scanner
+against a live advisory database.
+
+## Backlog carried into the next phase
+
+| Id | Item | Blocks hermesd? |
+|---|---|---|
+| `SEC-DEPENDENCIES-001` | Run a real dependency audit (`pip-audit` / `osv-scanner`) against both repositories. The review so far was manual. | **No** |
+| `SEC-SCANNER-002` | Add an `--internal` mode for private/VPN addresses, hostnames and network blocks. | **No** |
+| `PI-FUNCTIONAL-001` | Exercise the stdin prompt change and the guardrails check against a live Pi. Both were verified structurally; neither has run end to end. | **No — out of scope** |
+
+`PI-FUNCTIONAL-001` is explicitly outside the first Rust slice: Pi is not part
+of it, and the daemon must not grow a dependency on it.
+
 ---
 
 # Next phase: hermesd
