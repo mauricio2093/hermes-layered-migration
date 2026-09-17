@@ -84,6 +84,11 @@ every command: compute the order, compare against what was last published, and
 update only on a material change. Startup plus an infrequent refresh is enough.
 Respect scopes, and never drop a required command for a low score.
 
+## Status
+
+Steps 1 through 6 are closed; see [status.md](status.md). **Nothing is written
+in Rust yet and `hermesd` does not exist.**
+
 ## 7 · Then, and only then, the Rust slice
 
 A small resident daemon owning the 03:00 maintenance run: lock, scheduler,
