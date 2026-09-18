@@ -1,0 +1,37 @@
+[Unit]
+Description=Run Hermes maintenance observations daily
+Documentation=https://github.com/mauricio2093/hermes-layered-migration
+
+[Timer]
+OnCalendar=*-*-* 03:00:00
+# Measured on this host with disposable fixture units, not read from a manual.
+# Persistent compares a stamp file against the last calendar elapse:
+#   no stamp yet                  -> nothing to catch up from, no run
+#   stamp newer than last elapse  -> already done, no run
+#   stamp older than last elapse  -> the run was missed, catch up now
+# So a run missed to a powered-off machine happens at the next activation.
+# For three read-only observations that is wanted: a late observation is still
+# worth having.
+Persistent=true
+# The run does not land at 03:00:00 sharp, and should not. See the timer's
+# documentation for the real window.
+RandomizedDelaySec=300
+AccuracySec=1m
+# Unit= is deliberately absent: the timer and the service share a stem, so
+# systemd derives it. Declaring it would be a second source of truth that can
+# silently disagree with the filename.
+#
+# No OnBootSec, OnStartupSec or OnUnitActiveSec. Persistent=true already
+# expresses the whole catch-up policy, and a second trigger would make "when
+# does this run" a question with more than one answer.
+#
+# No FixedRandomDelay: nothing coordinates with this timer, so there is no
+# reason to want the same offset every day.
+#
+# No WakeSystem: this is a user unit, and on this host sleep.target,
+# suspend.target and hibernate.target are all masked. A host with a different
+# power policy would need its own decision; this timer promises nothing about
+# waking one up.
+
+[Install]
+WantedBy=timers.target

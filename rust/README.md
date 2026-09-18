@@ -65,11 +65,11 @@ must never appear in `systemctl --failed`.
 
 ## Installed?
 
-On this host, yes — as `~/.local/bin/hermes-maint` with a user unit that is
-started by hand. **There is no timer**; nothing is scheduled. See
-[`docs/systemd-integration.md`](../docs/systemd-integration.md), which also
-records which hardening directives survived contact with an unprivileged user
-manager and which did not.
+On this host, yes — `~/.local/bin/hermes-maint`, a user service, and a
+**timer at 03:00** ([`docs/timer.md`](../docs/timer.md)).
+[`docs/systemd-integration.md`](../docs/systemd-integration.md) records which
+hardening directives survived contact with an unprivileged user manager and
+which did not.
 
 ## Build and test
 

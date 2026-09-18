@@ -652,9 +652,12 @@ In order, and not before the boundary above is accepted:
 6d. Install the binary and the service, run it by hand. *(done —
    `v0.22.0-hermes-maint-systemd-manual`; see
    [systemd-integration.md](systemd-integration.md))*
+6e. The timer. *(done — `v0.23.0-hermes-maint-timer`; see
+   [timer.md](timer.md))*
 7. The units, verified with `systemd-analyze --user verify`. *(done)*
 8. Run it by hand, repeatedly, before letting the timer own it. *(done)*
-9. Only then, 03:00. **Not yet: no timer exists.**
+9. Only then, 03:00. *(scheduled — the timer is enabled and waiting. The
+   first natural firing has not been observed yet; that is a separate fact.)*
 
 The first commit was able to do nothing useful and still be correct. That was
 the point.
