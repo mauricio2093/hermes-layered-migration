@@ -138,5 +138,8 @@ pub fn registry() -> Vec<Box<dyn Task>> {
     vec![
         Box::new(crate::tasks::disk_space::DiskSpace::default()),
         Box::new(crate::tasks::backup_freshness::BackupFreshness::default()),
+        // The first task that runs an external program. Still read-only: one
+        // `systemctl --user show`, which queries and prints.
+        Box::new(crate::tasks::gateway_health::task()),
     ]
 }

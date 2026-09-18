@@ -23,6 +23,13 @@ fn main() {
 
         // --- output --------------------------------------------------------
         "echo-out" => print!("{}", args[1..].join(" ")),
+        // One argument per line, for standing in as a program whose output is
+        // line-structured -- `systemctl show`, for instance.
+        "echo-lines" => {
+            for a in &args[1..] {
+                println!("{a}");
+            }
+        }
         "echo-err" => eprint!("{}", args[1..].join(" ")),
 
         // Deterministic filler: byte i of the stream is `b'a' + (i % 26)`, so a

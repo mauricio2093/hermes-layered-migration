@@ -97,6 +97,15 @@ pub struct ChildSpec {
     pub timeout: Duration,
     /// How long it has between `SIGTERM` and `SIGKILL`.
     pub grace: Duration,
+    /// Variables added on top of [`BASE_ENV`], for a child that genuinely
+    /// needs one.
+    ///
+    /// Compiled in, like everything else on a spec, and **derived rather than
+    /// inherited**: the point is not to reach into the parent's environment
+    /// for a value, it is to construct the one value this child needs. A task
+    /// that wants `XDG_RUNTIME_DIR` computes it from the effective uid; it
+    /// does not copy ours, which might be missing, stale or someone else's.
+    pub env: Vec<(OsString, OsString)>,
 }
 
 impl ChildSpec {
@@ -115,7 +124,16 @@ impl ChildSpec {
             cwd: cwd.into(),
             timeout,
             grace,
+            env: Vec::new(),
         }
+    }
+
+    /// Add one variable on top of [`BASE_ENV`]. See [`ChildSpec::env`].
+    #[must_use]
+    pub fn env(mut self, key: impl AsRef<OsStr>, value: impl AsRef<OsStr>) -> Self {
+        self.env
+            .push((key.as_ref().to_os_string(), value.as_ref().to_os_string()));
+        self
     }
 
     #[must_use]
@@ -393,6 +411,10 @@ pub fn supervise(spec: &ChildSpec) -> ChildResult {
         // a race: the child may have exec'd, or spawned a grandchild, first.
         .process_group(0);
     for (k, v) in BASE_ENV {
+        command.env(k, v);
+    }
+    // Applied after the base, so a spec can override as well as add.
+    for (k, v) in &spec.env {
         command.env(k, v);
     }
 

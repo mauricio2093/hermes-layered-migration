@@ -24,19 +24,22 @@ close it
 exit with a defined code
 ```
 
-Two tasks are registered:
+Three tasks are registered:
 
-- **`disk-space`** — reads `statvfs(3)` directly.
+- **`disk-space`** — reads `statvfs(3)` directly. In process.
 - **`backup-freshness`** — age of the most recent backup whose own checks all
-  passed. It reads one JSON file per backup and never `mtime`, a directory
-  name or the presence of a `.tar.gz`; see
-  [`docs/task-backup-freshness.md`](../docs/task-backup-freshness.md).
+  passed. Never `mtime`, a directory name or the presence of a `.tar.gz`; see
+  [`docs/task-backup-freshness.md`](../docs/task-backup-freshness.md). In
+  process.
+- **`gateway-service-health`** — one `systemctl --user show` against the
+  gateway unit; see
+  [`docs/task-gateway-service-health.md`](../docs/task-gateway-service-health.md).
+  The only task that runs a process, and it only queries.
 
-Both run **in process**. The [child-process
+Nothing here starts, stops or restarts anything. The [child-process
 supervisor](../docs/child-supervisor.md) and the [external-task
-translation](../docs/external-tasks.md) exist and are tested end to end against
-a fixture, but **no registered task spawns anything**. Choosing the first real
-external observation is the next slice.
+translation](../docs/external-tasks.md) back the third task; the other two need
+no process at all.
 
 It opens no socket, makes no network call, needs no privileges, and never
 touches Hermes' own `state.db`.

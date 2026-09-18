@@ -33,11 +33,21 @@ pub const EXCERPT_CHARS: usize = 160;
 /// argv or a working directory.
 pub type SpecBuilder = Box<dyn Fn(&Paths) -> ChildSpec + Send + Sync>;
 
+/// Turns a finished child into a task report.
+///
+/// The default, [`interpret`], reads the exit status and nothing else, which
+/// is right for a program whose exit code *is* its verdict. It is wrong for a
+/// program that succeeds at reporting bad news -- `systemctl show` exits 0
+/// whether the service is running or gone -- so a task whose meaning lives in
+/// the output supplies its own.
+pub type Interpreter = Box<dyn Fn(&ChildResult) -> TaskReport + Send + Sync>;
+
 pub struct ExternalTask {
     id: &'static str,
     describe: &'static str,
     build: SpecBuilder,
     excerpt_output: bool,
+    interpreter: Option<Interpreter>,
 }
 
 impl std::fmt::Debug for ExternalTask {
@@ -57,7 +67,18 @@ impl ExternalTask {
             describe,
             build,
             excerpt_output: true,
+            interpreter: None,
         }
+    }
+
+    /// Replace the exit-status-only reading with one specific to this task.
+    ///
+    /// The lifecycle still belongs entirely to the supervisor; only the
+    /// meaning of the result changes.
+    #[must_use]
+    pub fn with_interpreter(mut self, interpreter: Interpreter) -> Self {
+        self.interpreter = Some(interpreter);
+        self
     }
 
     /// Keep only the structured fields -- outcome, exit, signal, duration,
@@ -83,7 +104,11 @@ impl Task for ExternalTask {
 
     fn run(&self, ctx: &TaskContext<'_>) -> Result<TaskReport, TaskError> {
         let spec = (self.build)(ctx.paths);
-        Ok(interpret(&supervise(&spec), self.excerpt_output))
+        let result = supervise(&spec);
+        Ok(match &self.interpreter {
+            Some(f) => f(&result),
+            None => interpret(&result, self.excerpt_output),
+        })
     }
 }
 

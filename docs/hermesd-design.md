@@ -621,7 +621,8 @@ Not arbitrary. Each step is chosen to introduce **one** new thing.
 | 2 | **`backup-freshness`** *(done — see [its own document](task-backup-freshness.md))* | judgement about someone else's artifacts | Deliberately second, because it forces decisions `disk-space` never needs: which directory is authoritative, what counts as a valid backup, whether the date comes from the name or the metadata, how a complete backup is told apart from a half-written one, and what "too old" means. And it must rest on **evidence of a verified backup**, not on `mtime` — this project has already paid for the difference between "a recent backup exists" and "a restorable backup exists". |
 | 3 | **child-process supervisor** *(done — see [its own document](child-supervisor.md))* | spawning, process groups, `SIGTERM`/`SIGKILL` escalation, deadlines | Its own slice, exercised against a deliberately harmless external command. Bundling it with a first task would mean debugging arithmetic and signal escalation in the same commit. |
 | 3.5 | **the external-task translation** *(done — see [its own document](external-tasks.md))* | `ChildResult` → `TaskResult`, outcome precedence, what reaches disk | Proven against a fixture, with no probe left in the registry. |
-| 4 | **a task that runs an existing script** | the real thing | Only once the supervisor is proven. |
+| 4 | **`gateway-service-health`** *(done — see [its own document](task-gateway-service-health.md))* | the first external program against the real system | `systemctl --user show`: it queries and prints. Its whole point is that the exit code is not the answer — `systemctl` exits 0 while reporting a missing unit. |
+| 5 | **a task that runs an existing maintenance script** | the real thing | Not yet. |
 
 ## 14. What happens next
 
@@ -638,6 +639,8 @@ In order, and not before the boundary above is accepted:
    `v0.19.0-hermes-maint-supervisor`)*
 6b. The translation from a supervised child to a task result, against a
    fixture. *(done — `v0.20.0-hermes-maint-external-tasks`)*
+6c. The first real external observation, read-only. *(done —
+   `v0.21.0-hermes-maint-gateway-health`)*
 7. The units, verified with `systemd-analyze verify`.
 8. Run it by hand, repeatedly, before letting the timer own it.
 9. Only then, 03:00.

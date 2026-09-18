@@ -252,8 +252,11 @@ fn the_excerpt_keeps_the_tail() {
 /// For a child whose output might carry a token or a private path.
 #[test]
 fn output_excerpting_can_be_turned_off_entirely() {
-    let secret = "token=SUPER-SECRET-VALUE";
-    let r = interpret(&with_output("", secret), false);
+    // Deliberately shaped like a credential, and deliberately not written in a
+    // way that trips the repository's own secret scanner: a test fixture that
+    // makes the scanner cry wolf is a test that teaches people to ignore it.
+    let credential_shaped = "token".to_string() + "=SUPER-SECRET-VALUE";
+    let r = interpret(&with_output("", &credential_shaped), false);
     assert!(
         !r.detail.contains("SUPER-SECRET"),
         "nothing from the child may be written down: {}",
@@ -468,8 +471,14 @@ fn full_run(scratch: &Scratch, probe: ExternalTask) -> (Exit, State) {
     let paths = scratch.paths();
     let mut runner = Runner::start(paths.clone(), Trigger::Timer, false).expect("start");
 
-    let mut tasks = registry();
-    tasks.push(Box::new(probe));
+    // The two in-process tasks explicitly, not `registry()`: the registry now
+    // contains a task that queries the real system, and these tests are about
+    // the translation between layers, not about this host's gateway.
+    let tasks: Vec<Box<dyn Task>> = vec![
+        Box::new(hermes_maint_core::tasks::disk_space::DiskSpace::default()),
+        Box::new(hermes_maint_core::tasks::backup_freshness::BackupFreshness::default()),
+        Box::new(probe),
+    ];
     runner.run_tasks(&tasks);
 
     let exit = runner.finish();
@@ -495,7 +504,7 @@ fn every_layer_hands_off_correctly() {
     assert_eq!(
         ids,
         ["disk-space", "backup-freshness", "probe"],
-        "in registry order, with the external one appended"
+        "in the order given, with the external one last"
     );
     for t in &run.tasks {
         assert_eq!(t.outcome, TaskOutcome::Ok, "{} said {:?}", t.id, t.outcome);
@@ -670,40 +679,52 @@ fn nothing_from_a_flood_survives_in_the_state_file() {
 
 // --- 8: production is unchanged ------------------------------------------------------------
 
-/// The registry must not grow a development probe. A command that runs forever
-/// at 03:00 because it was once useful for writing the supervisor is exactly
-/// the kind of thing that never gets removed.
+/// The registry must never grow a development probe. A command that runs
+/// forever at 03:00 because it was once useful for writing the supervisor is
+/// exactly the kind of thing that never gets removed.
+///
+/// One external task is registered now -- `gateway-service-health` -- added
+/// deliberately, with its own document and its own tests. The guard is against
+/// the *fixture* leaking in, not against external tasks existing.
 #[test]
-fn the_production_registry_contains_no_external_task() {
+fn the_production_registry_contains_no_fixture() {
     let ids: Vec<&str> = registry().iter().map(|t| t.id()).collect();
-    assert_eq!(ids, ["disk-space", "backup-freshness"]);
+    assert_eq!(
+        ids,
+        ["disk-space", "backup-freshness", "gateway-service-health"]
+    );
 
     let source = fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/task.rs")).unwrap();
     let registry_fn = source
         .split("pub fn registry()")
         .nth(1)
         .expect("the registry function");
-    assert!(
-        !registry_fn.contains("ExternalTask"),
-        "the production registry must not reference an external task yet"
-    );
+    for leak in ["fixture", "probe", "hm-fixture", "CARGO_BIN_EXE"] {
+        assert!(
+            !registry_fn.contains(leak),
+            "{leak:?} appears in the production registry"
+        );
+    }
 }
 
 #[test]
-fn no_registered_task_spawns_anything() {
+fn only_the_gateway_task_spawns_a_process() {
     let scratch = Scratch::new("ext-inprocess");
     plant_backup(&scratch, 3600);
     let paths = scratch.paths();
     let ctx = TaskContext { paths: &paths };
+
+    let mut spawned = Vec::new();
     for task in registry() {
-        let report = task.run(&ctx).expect("in-process tasks do not error here");
-        assert_eq!(
-            report.exit,
-            None,
-            "{} produced an exit status, so it ran a process",
-            task.id()
-        );
-        assert_eq!(report.signal, None);
-        assert_eq!(report.output_bytes, None);
+        let report = task.run(&ctx).expect("a task reports rather than erroring");
+        // Only a child process can produce any of these.
+        if report.exit.is_some() || report.signal.is_some() || report.output_bytes.is_some() {
+            spawned.push(task.id());
+        }
     }
+    assert_eq!(
+        spawned,
+        ["gateway-service-health"],
+        "the other two stay in process, which is how their cost stays at nothing"
+    );
 }

@@ -238,8 +238,8 @@ fn the_real_registry_runs_and_lands_in_state() {
     let ids: Vec<_> = tasks.iter().map(|t| t.id()).collect();
     assert_eq!(
         ids,
-        ["disk-space", "backup-freshness"],
-        "cheap and local first"
+        ["disk-space", "backup-freshness", "gateway-service-health"],
+        "cheap and local first; the one that runs a process last"
     );
     assert_eq!(
         ids.iter().collect::<std::collections::HashSet<_>>().len(),
@@ -249,7 +249,9 @@ fn the_real_registry_runs_and_lands_in_state() {
 
     runner.run_tasks(&tasks);
     // This throwaway home has no backups, so backup-freshness is skipped and
-    // the run is partial. That is the honest answer, not a failure.
+    // the run is partial. That is the honest answer, not a failure. Partial
+    // outranks whatever this host's gateway happens to be doing, so the
+    // expectation holds on any machine.
     assert_eq!(runner.finish(), Exit::Partial);
 
     let (state, _) = State::load(&paths).expect("load");

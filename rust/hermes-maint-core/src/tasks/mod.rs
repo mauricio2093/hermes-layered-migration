@@ -3,3 +3,4 @@
 pub mod backup_freshness;
 pub mod disk_space;
 pub mod external;
+pub mod gateway_health;
