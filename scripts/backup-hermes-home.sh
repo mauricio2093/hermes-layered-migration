@@ -18,11 +18,28 @@ ARCHIVE="$DEST/hermes-home-$TS.tar.gz"
 STATE="$DEST/state.json"
 
 # Conteos de FICHEROS FUENTE (sin __pycache__/*.pyc, que el tar excluye).
-# Revisados a mano 2026-09-16 (scripts=5 tras anadir scan-secrets.sh). Si cambian legítimamente, actualizar aquí
+# Revisados a mano 2026-09-18. Si cambian legítimamente, actualizar aquí
 # conscientemente: son la defensa contra un glob que respalde media instalación.
 # anchors=27: sus 28 fuentes menos anchors/data/phone.db, que viaja en db-consistent/.
-declare -A EXPECT=( [plugins]=6 [scripts]=5 [patches]=6 [anchors]=27 [voice-samples]=7 )
-DBS=(state.db verification_evidence.db kanban.db cron/executions.db cron/notepad.db anchors/data/phone.db)
+#
+# scripts 5 -> 8 (2026-09-18, BACKUP-DECL-006). Los tres nuevos se verificaron
+# uno a uno contra el tar del ultimo backup verificado (20260916-182215), que
+# contenia exactamente los cinco anteriores:
+#   cutover.sh       corte del gateway fosil -> clon limpio
+#   push-limpio.sh   publicacion de la historia limpia
+#   rollback.sh      la herramienta de recuperacion; ninguna razon la justifica
+#                    mas que esta para estar dentro del backup
+# Los tres son bash escrito a mano, 0700, sin secretos. Ninguno es temporal,
+# generado, cache ni artefacto de pruebas.
+declare -A EXPECT=( [plugins]=6 [scripts]=8 [patches]=6 [anchors]=27 [voice-samples]=7 )
+# 6 -> 8 (2026-09-18, BACKUP-DECL-006). Hermes 0.21.3 trajo dos bases nuevas que
+# no capturaba nadie: el tar excluye *.db y no estaban declaradas aqui, asi que
+# habrian faltado en silencio. Entran por la misma via que las demas -- copia
+# consistente con Connection.backup() en db-consistent/ e integrity_check --
+# sin excepciones:
+#   shared-state.db       Hosted Rooms / coordinacion durable
+#   cron/deliveries.db    cola durable de entregas cron + tombstones
+DBS=(state.db verification_evidence.db kanban.db shared-state.db cron/executions.db cron/deliveries.db cron/notepad.db anchors/data/phone.db)
 SECRETS=(.env auth.json config.yaml channel_directory.json)
 
 ok_created=false; ok_archive=false; ok_db=false; ok_manifest=false; ok_restore=false
@@ -145,11 +162,16 @@ cat > "$DEST/RESTORE.md" <<EOF
 # Restaurar este backup
 
     tar -xzf $(basename "$ARCHIVE") -C /destino
-    # las DB NO están en el tar; copiarlas desde db-consistent/:
+    # El tar trae las entradas de directorio, pero esto no cuesta nada y cubre
+    # un destino donde cron/ o anchors/data/ no se hayan materializado:
+    mkdir -p /destino/$BASE/cron /destino/$BASE/anchors/data
+    # las DB NO están en el tar; copiarlas desde db-consistent/ (8):
     cp db-consistent/state.db                  /destino/$BASE/state.db
     cp db-consistent/verification_evidence.db  /destino/$BASE/verification_evidence.db
     cp db-consistent/kanban.db                 /destino/$BASE/kanban.db
+    cp db-consistent/shared-state.db           /destino/$BASE/shared-state.db
     cp db-consistent/cron_executions.db        /destino/$BASE/cron/executions.db
+    cp db-consistent/cron_deliveries.db        /destino/$BASE/cron/deliveries.db
     cp db-consistent/cron_notepad.db           /destino/$BASE/cron/notepad.db
     cp db-consistent/anchors_data_phone.db     /destino/$BASE/anchors/data/phone.db
 
