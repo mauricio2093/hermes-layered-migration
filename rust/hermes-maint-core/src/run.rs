@@ -11,7 +11,7 @@ use crate::exit::Exit;
 use crate::lock::{Lock, LockError};
 use crate::paths::Paths;
 use crate::state::{clamp_detail, LoadError, Origin, Outcome, Run, State, TaskOutcome, TaskResult};
-use crate::task::{Observation, Task, TaskContext};
+use crate::task::{Task, TaskContext, TaskReport};
 
 /// What started this run. An allowlist, not free text: the value is recorded
 /// in state and shown in reports, and unvalidated input has no business there.
@@ -220,17 +220,19 @@ impl Runner {
         let paths = self.paths.clone();
         let ctx = TaskContext { paths: &paths };
         for task in tasks {
+            // Monotonic: a clock step mid-task must not change a recorded
+            // duration, for the same reason it must not move a deadline.
             let started = std::time::Instant::now();
-            let (outcome, detail) = match task.run(&ctx) {
-                Ok(Observation::Ok(d)) => (TaskOutcome::Ok, d),
-                Ok(Observation::Degraded(d)) => (TaskOutcome::Degraded, d),
-                Ok(Observation::Skipped(d)) => (TaskOutcome::Skipped, d),
-                Err(e) => (TaskOutcome::Failed, e.to_string()),
+            let report = match task.run(&ctx) {
+                Ok(r) => r,
+                // `Err` means the task's own machinery broke, which is a
+                // failure of the check, not an observation.
+                Err(e) => TaskReport::new(TaskOutcome::Failed, e.to_string()),
             };
             let duration_s = started.elapsed().as_secs();
-            let detail = clamp_detail(&detail);
+            let detail = clamp_detail(&report.detail);
 
-            match outcome {
+            match report.outcome {
                 TaskOutcome::Ok => crate::info!("{}: {detail}", task.id()),
                 TaskOutcome::Degraded | TaskOutcome::Skipped => {
                     crate::warn!("{}: {detail}", task.id());
@@ -240,11 +242,11 @@ impl Runner {
 
             self.record_task(TaskResult {
                 id: task.id().to_string(),
-                outcome,
-                // In-process tasks have no exit status. When the child
-                // supervisor lands, that is where this gets filled in.
-                exit: None,
+                outcome: report.outcome,
+                exit: report.exit,
+                signal: report.signal,
                 duration_s,
+                output_bytes: report.output_bytes,
                 detail: Some(detail),
             });
         }
@@ -272,17 +274,7 @@ impl Runner {
     /// because a task that did not finish tells you less than one that did.
     #[must_use]
     pub fn outcome(&self) -> Outcome {
-        let mut worst = Outcome::Ok;
-        for t in &self.run.tasks {
-            let candidate = match t.outcome {
-                TaskOutcome::Timeout => Outcome::Timeout,
-                TaskOutcome::Failed | TaskOutcome::Skipped => Outcome::Partial,
-                TaskOutcome::Degraded => Outcome::Degraded,
-                TaskOutcome::Ok => continue,
-            };
-            worst = rank_max(worst, candidate);
-        }
-        worst
+        aggregate(&self.run.tasks)
     }
 
     /// Close the run, persist, and hand back the process exit code.
@@ -318,6 +310,39 @@ impl Runner {
         crate::info!("run {id} closed as {outcome:?} in {duration}s");
         outcome.exit()
     }
+}
+
+/// The run's outcome, from the tasks that ran.
+///
+/// A pure function over the recorded results, and **order-independent**: it
+/// takes the maximum of a total ordering rather than folding in whatever
+/// sequence the tasks happened to run in. A run whose verdict depended on task
+/// order would be a run whose verdict changed when someone reordered the
+/// registry.
+///
+/// ```text
+/// Timeout  >  Interrupted  >  Partial  >  Degraded  >  Ok
+/// ```
+///
+/// The ordering is a claim about how much attention each deserves:
+///
+/// - **Timeout** outranks everything because something had to be killed, and
+///   a process that would not stop is the most urgent thing in the report.
+/// - **Partial** (a task failed or was skipped) outranks **Degraded** because
+///   a check that did not complete tells you less than one that did. A
+///   degraded observation is information; a missing one is a gap.
+/// - **Ok** is the identity: a run with no tasks at all is `Ok`.
+#[must_use]
+pub fn aggregate(tasks: &[TaskResult]) -> Outcome {
+    tasks
+        .iter()
+        .map(|t| match t.outcome {
+            TaskOutcome::Timeout => Outcome::Timeout,
+            TaskOutcome::Failed | TaskOutcome::Skipped => Outcome::Partial,
+            TaskOutcome::Degraded => Outcome::Degraded,
+            TaskOutcome::Ok => Outcome::Ok,
+        })
+        .fold(Outcome::Ok, rank_max)
 }
 
 fn rank_max(a: Outcome, b: Outcome) -> Outcome {

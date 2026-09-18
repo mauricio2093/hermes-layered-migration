@@ -21,9 +21,9 @@ pub mod tasks;
 
 pub use exit::Exit;
 pub use lock::{Lock, LockError};
-pub use run::{Runner, Trigger};
+pub use run::{aggregate, Runner, Trigger};
 pub use state::{Outcome, State, SCHEMA};
-pub use task::{Observation, Task, TaskContext, TaskError};
+pub use task::{Observation, Task, TaskContext, TaskError, TaskReport};
 
 /// Seconds since the Unix epoch.
 ///

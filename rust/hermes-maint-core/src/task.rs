@@ -13,6 +13,7 @@
 use std::fmt;
 
 use crate::paths::Paths;
+use crate::state::TaskOutcome;
 
 /// What a task saw. The string is a short, human-readable summary that ends up
 /// in the journal and in `state.json`.
@@ -63,6 +64,50 @@ pub struct TaskContext<'a> {
     pub paths: &'a Paths,
 }
 
+/// What a task hands back: the verdict, plus whatever structured evidence it
+/// has.
+///
+/// [`Observation`] is the vocabulary of an **in-process** check, which can
+/// only be fine, not fine, or unable to look. A task backed by a child process
+/// has more to say -- it can fail, it can be killed on a deadline, and it has
+/// an exit status -- so this is the wider type the trait returns. In-process
+/// tasks build one with `.into()`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskReport {
+    pub outcome: TaskOutcome,
+    pub detail: String,
+    /// Exit status, for a task backed by a process.
+    pub exit: Option<i32>,
+    /// The signal that ended it, when one did.
+    pub signal: Option<i32>,
+    /// Total bytes the child wrote across both streams.
+    pub output_bytes: Option<u64>,
+}
+
+impl TaskReport {
+    #[must_use]
+    pub fn new(outcome: TaskOutcome, detail: impl Into<String>) -> Self {
+        Self {
+            outcome,
+            detail: detail.into(),
+            exit: None,
+            signal: None,
+            output_bytes: None,
+        }
+    }
+}
+
+impl From<Observation> for TaskReport {
+    fn from(o: Observation) -> Self {
+        let outcome = match &o {
+            Observation::Ok(_) => TaskOutcome::Ok,
+            Observation::Degraded(_) => TaskOutcome::Degraded,
+            Observation::Skipped(_) => TaskOutcome::Skipped,
+        };
+        Self::new(outcome, o.detail())
+    }
+}
+
 pub trait Task {
     /// Stable identifier. It is recorded in state, so it must not change
     /// casually -- history would stop lining up.
@@ -71,7 +116,12 @@ pub trait Task {
     /// One line about what it looks at, for `--list-tasks` and the journal.
     fn describe(&self) -> &'static str;
 
-    fn run(&self, ctx: &TaskContext<'_>) -> Result<Observation, TaskError>;
+    /// `Err` is reserved for the task's own machinery breaking -- it becomes
+    /// `Failed`. A child process that exits non-zero is not an error here: it
+    /// is a perfectly successful observation that something went wrong, and it
+    /// comes back as `Ok(TaskReport { outcome: Failed, .. })` with its exit
+    /// status intact.
+    fn run(&self, ctx: &TaskContext<'_>) -> Result<TaskReport, TaskError>;
 }
 
 /// The built-in tasks, in the order they run.

@@ -87,7 +87,19 @@ pub struct TaskResult {
     /// tasks have none.
     #[serde(default)]
     pub exit: Option<i32>,
+    /// The signal that ended it, when one did. `exit` and `signal` are
+    /// mutually exclusive, and keeping both distinguishes "exited 1" from
+    /// "killed by 9" -- which are different problems.
+    #[serde(default)]
+    pub signal: Option<i32>,
     pub duration_s: u64,
+    /// How much the child wrote, in total, across both streams.
+    ///
+    /// The bytes themselves are **not** kept (see `docs/external-tasks.md`);
+    /// this preserves the one fact about them that survives sampling: whether
+    /// the child was quiet or wrote four megabytes.
+    #[serde(default)]
+    pub output_bytes: Option<u64>,
     /// A short human summary of what the task saw. Truncated on the way in:
     /// state that grows with whatever a task felt like saying is a disk
     /// problem waiting to happen.

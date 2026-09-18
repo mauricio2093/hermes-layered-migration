@@ -12,7 +12,9 @@ fn task(id: &str, outcome: TaskOutcome) -> TaskResult {
         id: id.into(),
         outcome,
         exit: Some(0),
+        signal: None,
         duration_s: 1,
+        output_bytes: None,
         detail: None,
     }
 }

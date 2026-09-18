@@ -13,7 +13,7 @@
 use std::ffi::CString;
 use std::path::Path;
 
-use crate::task::{Observation, Task, TaskContext, TaskError};
+use crate::task::{Observation, Task, TaskContext, TaskError, TaskReport};
 
 /// Warn below this many free bytes, whatever the disk's size. On a small
 /// filesystem a percentage is useless; this is the floor that matters.
@@ -92,10 +92,10 @@ impl Task for DiskSpace {
         "free space and inodes on the filesystem holding HERMES_HOME"
     }
 
-    fn run(&self, ctx: &TaskContext<'_>) -> Result<Observation, TaskError> {
+    fn run(&self, ctx: &TaskContext<'_>) -> Result<TaskReport, TaskError> {
         let usage = statvfs(ctx.paths.hermes_home())
             .map_err(|e| TaskError(format!("could not read filesystem usage: {e}")))?;
-        Ok(judge(&usage))
+        Ok(judge(&usage).into())
     }
 }
 

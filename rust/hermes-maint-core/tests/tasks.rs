@@ -4,7 +4,7 @@ mod common;
 
 use common::TempHome;
 use hermes_maint_core::state::{Outcome, State, TaskOutcome, MAX_DETAIL_CHARS};
-use hermes_maint_core::task::{registry, Observation, Task, TaskContext, TaskError};
+use hermes_maint_core::task::{registry, Observation, Task, TaskContext, TaskError, TaskReport};
 use hermes_maint_core::tasks::disk_space::{
     human_bytes, judge, statvfs, Usage, MIN_FREE_BYTES, MIN_FREE_FRACTION, MIN_FREE_INODE_FRACTION,
 };
@@ -202,8 +202,8 @@ impl Task for Fake {
     fn describe(&self) -> &'static str {
         "a task that exists only in tests"
     }
-    fn run(&self, _ctx: &TaskContext<'_>) -> Result<Observation, TaskError> {
-        self.result.clone().map_err(TaskError)
+    fn run(&self, _ctx: &TaskContext<'_>) -> Result<TaskReport, TaskError> {
+        self.result.clone().map(TaskReport::from).map_err(TaskError)
     }
 }
 

@@ -32,10 +32,11 @@ Two tasks are registered:
   name or the presence of a `.tar.gz`; see
   [`docs/task-backup-freshness.md`](../docs/task-backup-freshness.md).
 
-Both run **in process**. The child-process supervisor exists and is tested,
-but no task uses it yet: see
-[`docs/child-supervisor.md`](../docs/child-supervisor.md). The first external
-task is the next slice.
+Both run **in process**. The [child-process
+supervisor](../docs/child-supervisor.md) and the [external-task
+translation](../docs/external-tasks.md) exist and are tested end to end against
+a fixture, but **no registered task spawns anything**. Choosing the first real
+external observation is the next slice.
 
 It opens no socket, makes no network call, needs no privileges, and never
 touches Hermes' own `state.db`.

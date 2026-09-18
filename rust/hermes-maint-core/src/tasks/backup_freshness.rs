@@ -19,7 +19,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::task::{Observation, Task, TaskContext, TaskError};
+use crate::task::{Observation, Task, TaskContext, TaskError, TaskReport};
 
 /// Where backups live, relative to `HERMES_HOME`. Compiled in: configuration
 /// may never point this somewhere else. A settable path would hand whatever
@@ -391,10 +391,10 @@ impl Task for BackupFreshness {
         "age of the most recent backup whose own checks all passed"
     }
 
-    fn run(&self, ctx: &TaskContext<'_>) -> Result<Observation, TaskError> {
+    fn run(&self, ctx: &TaskContext<'_>) -> Result<TaskReport, TaskError> {
         let scan = scan(ctx.paths.hermes_home())
             .map_err(|e| TaskError(format!("could not read the backup directory: {e}")))?;
-        Ok(judge(&scan, crate::now() as i64, self.max_age_seconds))
+        Ok(judge(&scan, crate::now() as i64, self.max_age_seconds).into())
     }
 }
 
