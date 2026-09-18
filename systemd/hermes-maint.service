@@ -1,0 +1,80 @@
+[Unit]
+Description=Hermes scheduled maintenance observer
+Documentation=https://github.com/mauricio2093/hermes-layered-migration
+# Deliberately no Wants=, Requires= or PartOf= on hermes-gateway.service.
+# One of this unit's three observations is whether that gateway is healthy, and
+# a dependency would have systemd start it before we could look. A maintenance
+# run must be able to report a gateway that is down, not quietly bring it up
+# and then declare everything fine.
+
+[Service]
+Type=oneshot
+Environment=HERMES_HOME=%h/.hermes
+# --trigger timer, not manual: this unit is the entrypoint the timer will
+# activate in the next slice. Starting it by hand now rehearses exactly that,
+# so its runs are recorded as trigger=timer. A person running the tool directly
+# uses `hermes-maint run --trigger manual`, and the state file distinguishes
+# the two without needing a second unit.
+ExecStart=%h/.local/bin/hermes-maint run --trigger timer
+# 3 is a contended lock: another run already holds it and is doing the work.
+# That is the lock functioning, and it must never reach `systemctl --failed`.
+# Nothing else joins this list. 4 partial, 5 timeout, 6 degraded and
+# 7 incompatible-state are findings, and a finding must look like a problem in
+# systemd rather than be painted green.
+SuccessExitStatus=3
+# A last-resort fuse, NOT a substitute for the supervisor's own deadlines.
+# The Rust supervisor owns its children's timeouts: 15s plus a 3s grace for the
+# one external child, with the two in-process tasks costing microseconds, so
+# the real worst case is about 18 seconds. 300 leaves roughly a sixteenfold
+# margin for a much slower disk while still bounding a bug in hermes-maint
+# itself. If it ever fires, the open run is left unclosed and the next run
+# reconciles it as Interrupted.
+TimeoutStartSec=300
+UMask=0077
+# Measured before it was chosen, not picked to look prudent:
+#   peak RSS of the process      ~8 MB   (/usr/bin/time -v, five runs)
+#   peak of the whole cgroup     ~2 MB   (MemoryPeak, three runs; lower than
+#                                         the RSS because the binary's pages
+#                                         are already in page cache and
+#                                         charged elsewhere)
+# 128M is roughly sixty times the measured cgroup peak, so no legitimate run
+# can reach it, while still bounding a runaway allocation on a host with
+# 6.3 GB of RAM and a few hundred megabytes free. Being killed here leaves an
+# open run, which the next run reconciles as Interrupted -- a safe failure.
+MemoryMax=128M
+
+# --- hardening: only what was verified to work AND not break an observation ---
+#
+# Every directive below was run for real against this host, one at a time.
+# `systemd-analyze --user security` marks several more as available; they are
+# not here, and the reasons are recorded in docs/systemd-integration.md.
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+RestrictRealtime=yes
+RestrictNamespaces=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+# AF_UNIX only. Verified that the user bus, which gateway-service-health needs,
+# still works: it is a Unix socket. Inet sockets are refused outright.
+RestrictAddressFamilies=AF_UNIX
+
+# Deliberately absent, each for a measured reason:
+#
+#   ProtectKernelModules=yes   unsupported in an unprivileged user unit; the
+#                              service dies at step CAPABILITIES with 218,
+#                              because dropping a bounding-set capability
+#                              needs CAP_SETPCAP.
+#
+#   ProtectSystem=strict       any filesystem-sandboxing directive makes an
+#   PrivateTmp=yes             unprivileged user manager set up a user
+#   ProtectKernelTunables=yes  namespace whose uid_map is `1000 1000 1`.
+#   ProtectControlGroups=yes   Inside it every unmapped owner, root included,
+#   ProtectHome=yes            appears as 65534, so /usr/bin/systemctl looks
+#   ReadWritePaths=            nobody-owned and the supervisor's pre-flight
+#   PrivateNetwork=yes         correctly refuses to execute it. Measured, not
+#                              assumed. The pre-flight rule is not being
+#                              weakened to win a score.
+#
+# No [Install] section, on purpose: a oneshot with no timer has nothing to be
+# enabled into, and `systemctl --user enable` failing loudly is the point.

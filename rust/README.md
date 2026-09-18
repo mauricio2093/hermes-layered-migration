@@ -63,6 +63,14 @@ touches Hermes' own `state.db`.
 Exit 3 is why the unit declares `SuccessExitStatus=3`: a lock doing its job
 must never appear in `systemctl --failed`.
 
+## Installed?
+
+On this host, yes — as `~/.local/bin/hermes-maint` with a user unit that is
+started by hand. **There is no timer**; nothing is scheduled. See
+[`docs/systemd-integration.md`](../docs/systemd-integration.md), which also
+records which hardening directives survived contact with an unprivileged user
+manager and which did not.
+
 ## Build and test
 
 ```bash

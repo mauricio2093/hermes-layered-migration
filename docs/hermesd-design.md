@@ -451,10 +451,18 @@ Service:
 ```ini
 [Service]
 Type=oneshot
-ExecStart=%h/.local/bin/hermes-maint run
+Environment=HERMES_HOME=%h/.hermes
+ExecStart=%h/.local/bin/hermes-maint run --trigger timer
 SuccessExitStatus=3
-TimeoutStartSec=...
+TimeoutStartSec=300
 ```
+
+**`--trigger timer`, not the default.** The CLI defaults to `manual`, so a
+service without the flag would record every scheduled run as if a person had
+typed it. The service *is* the timer's entrypoint, and starting it by hand is a
+rehearsal of that — so its runs are `trigger=timer` either way. A person
+running the tool directly uses `hermes-maint run --trigger manual`. One unit,
+two triggers, told apart in the state file rather than by a second unit.
 
 `Type=oneshot` is the honest type: systemd waits for completion and records the
 result, and the unit is correctly `inactive (dead)` between runs rather than
@@ -641,9 +649,12 @@ In order, and not before the boundary above is accepted:
    fixture. *(done — `v0.20.0-hermes-maint-external-tasks`)*
 6c. The first real external observation, read-only. *(done —
    `v0.21.0-hermes-maint-gateway-health`)*
-7. The units, verified with `systemd-analyze verify`.
-8. Run it by hand, repeatedly, before letting the timer own it.
-9. Only then, 03:00.
+6d. Install the binary and the service, run it by hand. *(done —
+   `v0.22.0-hermes-maint-systemd-manual`; see
+   [systemd-integration.md](systemd-integration.md))*
+7. The units, verified with `systemd-analyze --user verify`. *(done)*
+8. Run it by hand, repeatedly, before letting the timer own it. *(done)*
+9. Only then, 03:00. **Not yet: no timer exists.**
 
 The first commit was able to do nothing useful and still be correct. That was
 the point.
