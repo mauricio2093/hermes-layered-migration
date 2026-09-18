@@ -32,9 +32,10 @@ Two tasks are registered:
   name or the presence of a `.tar.gz`; see
   [`docs/task-backup-freshness.md`](../docs/task-backup-freshness.md).
 
-Tasks run in process — nothing spawns a child, enforces a deadline or signals
-a process group yet. That is the next slice, and it should not be debugged in
-the same commit as a task's arithmetic.
+Both run **in process**. The child-process supervisor exists and is tested,
+but no task uses it yet: see
+[`docs/child-supervisor.md`](../docs/child-supervisor.md). The first external
+task is the next slice.
 
 It opens no socket, makes no network call, needs no privileges, and never
 touches Hermes' own `state.db`.

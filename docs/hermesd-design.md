@@ -619,7 +619,7 @@ Not arbitrary. Each step is chosen to introduce **one** new thing.
 |---|---|---|---|
 | 1 | **`disk-space`** | the task registry, `Observation`, `TaskResult`, run outcome, exit 0/6 | Read-only, knows nothing about Hermes, no database, no privileges, no network, and essentially no destructive way to fail. It reads `statvfs(3)` directly rather than running `df`, so the first task introduces **no subprocess at all**. |
 | 2 | **`backup-freshness`** *(done — see [its own document](task-backup-freshness.md))* | judgement about someone else's artifacts | Deliberately second, because it forces decisions `disk-space` never needs: which directory is authoritative, what counts as a valid backup, whether the date comes from the name or the metadata, how a complete backup is told apart from a half-written one, and what "too old" means. And it must rest on **evidence of a verified backup**, not on `mtime` — this project has already paid for the difference between "a recent backup exists" and "a restorable backup exists". |
-| 3 | **child-process supervisor** | spawning, process groups, `SIGTERM`/`SIGKILL` escalation, deadlines | Its own slice, exercised against a deliberately harmless external command. Bundling it with a first task would mean debugging arithmetic and signal escalation in the same commit. |
+| 3 | **child-process supervisor** *(done — see [its own document](child-supervisor.md))* | spawning, process groups, `SIGTERM`/`SIGKILL` escalation, deadlines | Its own slice, exercised against a deliberately harmless external command. Bundling it with a first task would mean debugging arithmetic and signal escalation in the same commit. |
 | 4 | **a task that runs an existing script** | the real thing | Only once the supervisor is proven. |
 
 ## 14. What happens next
@@ -633,7 +633,8 @@ In order, and not before the boundary above is accepted:
 4. One real task, chosen for being read-only and boring: `disk-space`. *(done)*
 5. `backup-freshness`, on evidence rather than `mtime`. *(done —
    `v0.18.0-hermes-maint-backup-freshness`)*
-6. The child-process supervisor, in its own slice.
+6. The child-process supervisor, in its own slice. *(done —
+   `v0.19.0-hermes-maint-supervisor`)*
 7. The units, verified with `systemd-analyze verify`.
 8. Run it by hand, repeatedly, before letting the timer own it.
 9. Only then, 03:00.

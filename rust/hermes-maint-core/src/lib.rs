@@ -15,6 +15,7 @@ pub mod log;
 pub mod paths;
 pub mod run;
 pub mod state;
+pub mod supervisor;
 pub mod task;
 pub mod tasks;
 
