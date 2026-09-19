@@ -9,10 +9,10 @@ systemd timer           ACTIVE     daily, 03:00 (+0–300s), user unit
 tasks                   disk-space · backup-freshness · gateway-service-health
 auto-remediation        NO         every task observes and reports, nothing acts
 Onion integrated        NO         zero Rust touches the router
-Layer 2 in production   NO         still on branch feat/layer2-schema
+Layer 2 in production   YES        deployed 2026-09-18 19:04; observation window open
 ```
 
-Last updated 2026-09-18, after the timer's first natural firing.
+Last updated 2026-09-18, after deploying Layer 2.
 
 ## What runs unattended today
 
