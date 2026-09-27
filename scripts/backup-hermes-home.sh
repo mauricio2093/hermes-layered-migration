@@ -31,7 +31,26 @@ STATE="$DEST/state.json"
 #                    mas que esta para estar dentro del backup
 # Los tres son bash escrito a mano, 0700, sin secretos. Ninguno es temporal,
 # generado, cache ni artefacto de pruebas.
-declare -A EXPECT=( [plugins]=6 [scripts]=8 [patches]=6 [anchors]=27 [voice-samples]=7 )
+declare -A EXPECT=( [patches]=6 [anchors]=27 [voice-samples]=7 )
+# plugins y scripts: POR NOMBRE, con manifiesto sha256 (2026-09-27).
+# El recuento no distinguia un fichero perdido compensado por uno nuevo, no veia
+# la corrupcion, y fallaba con cualquier cambio legitimo (instalar un plugin
+# revisado subia plugins de 6 a 19). Ahora:
+#   - se declaran los NOMBRES: un plugin (dir con plugin.yaml) o script no
+#     declarado aborta, igual que una base no declarada; añadirlo es haberlo
+#     revisado;
+#   - el contenido viaja con content-manifest.sha256, y el restore lo comprueba
+#     en las dos direcciones: nada falta, nada sobra, nada cambia.
+# Los nombres viven FUERA de este repo, en $HERMES_HOME/backup-declarations.sh
+# (dentro del backup): son de la instalacion, no del codigo, y este repo es
+# publico. Sin ese fichero no hay declaracion, y el backup no se da por bueno.
+CONTENT_DIRS=(plugins scripts)
+DECL_FILE="$HERMES_HOME/backup-declarations.sh"
+DECL_PLUGINS=(); DECL_SCRIPTS=()
+if [ -f "$DECL_FILE" ]; then
+  # shellcheck source=/dev/null
+  . "$DECL_FILE"
+fi
 # 6 -> 8 (2026-09-18, BACKUP-DECL-006). Hermes 0.21.3 trajo dos bases nuevas que
 # no capturaba nadie: el tar excluye *.db y no estaban declaradas aqui, asi que
 # habrian faltado en silencio. Entran por la misma via que las demas -- copia
@@ -43,7 +62,24 @@ DBS=(state.db verification_evidence.db kanban.db shared-state.db cron/executions
 SECRETS=(.env auth.json config.yaml channel_directory.json)
 
 ok_created=false; ok_archive=false; ok_db=false; ok_manifest=false; ok_restore=false
+decl_ok=true
 step() { echo; echo "── $* ──"; }
+# El mismo filtro en el vivo, en el manifiesto y en el restore: lo que el tar
+# excluye (__pycache__, *.pyc) no cuenta en ninguno de los tres.
+content_files() { ( cd "$1" && find "${CONTENT_DIRS[@]}" -type f ! -path '*__pycache__*' ! -name '*.pyc' 2>/dev/null | LC_ALL=C sort ); }
+same_set() {  # $1 etiqueta, $2 declarados (uno por linea), $3 en disco
+  local faltan sobran
+  faltan=$(comm -23 <(printf '%s\n' "$2" | LC_ALL=C sort -u) <(printf '%s\n' "$3" | LC_ALL=C sort -u) | sed '/^$/d')
+  sobran=$(comm -13 <(printf '%s\n' "$2" | LC_ALL=C sort -u) <(printf '%s\n' "$3" | LC_ALL=C sort -u) | sed '/^$/d')
+  if [ -z "$faltan$sobran" ]; then
+    printf '   ✓ %-26s %s declarados, los mismos en disco\n' "$1" "$(printf '%s\n' "$2" | sed '/^$/d' | wc -l)"
+  else
+    echo "   ✗ ABORT: $1 no coincide con lo declarado"
+    [ -n "$faltan" ] && printf '      falta:        %s\n' $faltan
+    [ -n "$sobran" ] && printf '      no declarado: %s\n' $sobran
+    decl_ok=false
+  fi
+}
 flat() { echo "$1" | tr '/' '_'; }
 
 mkdir -p "$DBDIR" || exit 1; chmod 700 "$DEST"
@@ -93,6 +129,16 @@ if [ "$undeclared" -ne "$expected_databases" ]; then
 fi
 $db_ok && ok_db=true
 
+step "2b. Declaraciones por nombre (plugins, scripts)"
+[ -f "$DECL_FILE" ] || { echo "   ✗ ABORT: falta $DECL_FILE (DECL_PLUGINS, DECL_SCRIPTS)"; decl_ok=false; }
+same_set "plugins" "$(printf '%s\n' "${DECL_PLUGINS[@]}")" \
+  "$(cd "$HERMES_HOME/plugins" 2>/dev/null && find . -name plugin.yaml ! -path '*__pycache__*' | sed 's|^\./||; s|/plugin.yaml$||')"
+same_set "scripts" "$(printf '%s\n' "${DECL_SCRIPTS[@]}")" \
+  "$(cd "$HERMES_HOME/scripts" 2>/dev/null && find . -type f ! -path '*__pycache__*' ! -name '*.pyc' | sed 's|^\./||')"
+# Manifiesto del contenido, tomado del VIVO justo antes de empaquetar.
+content_files "$HERMES_HOME" | ( cd "$HERMES_HOME" && tr '\n' '\0' | xargs -0 -r sha256sum ) > "$DEST/content-manifest.sha256"
+echo "   content-manifest: $(wc -l < "$DEST/content-manifest.sha256") ficheros de ${CONTENT_DIRS[*]}"
+
 step "3+4. Empaquetar (excluye regenerables y las DB en caliente)"
 tar -czf "$ARCHIVE" -C "$(dirname "$HERMES_HOME")" \
   --exclude="$BASE/backups" --exclude="$BASE/rescue" \
@@ -138,6 +184,21 @@ while read -r perm f; do
                        || { printf '   ✗ %-26s perms %s != %s\n' "$f" "$p" "$perm"; restore_ok=false; }
   else printf '   ✗ %-26s AUSENTE\n' "$f"; restore_ok=false; fi
 done < "$DEST/perms-esperados.txt"
+
+# plugins/ y scripts/: el restaurado debe ser EXACTAMENTE el manifiesto.
+if ( cd "$H" && sha256sum -c --quiet "$DEST/content-manifest.sha256" ) >/dev/null 2>&1; then
+  sobran=$(comm -13 <(cut -c67- "$DEST/content-manifest.sha256" | LC_ALL=C sort) <(content_files "$H"))
+  if [ -z "$sobran" ]; then
+    printf '   ✓ %-26s %s ficheros, sha256 identico\n' "${CONTENT_DIRS[*]}" "$(wc -l < "$DEST/content-manifest.sha256")"
+  else
+    echo "   ✗ restaurado trae ficheros fuera del manifiesto:"; printf '      %s\n' $sobran; restore_ok=false
+  fi
+else
+  echo "   ✗ ${CONTENT_DIRS[*]}: el restaurado no coincide con el manifiesto"
+  ( cd "$H" && sha256sum -c --quiet "$DEST/content-manifest.sha256" 2>&1 | sed 's/^/      /' | head -10 )
+  restore_ok=false
+fi
+$decl_ok || { echo "   ✗ declaraciones por nombre fallidas (paso 2b)"; restore_ok=false; }
 
 for d in "${!EXPECT[@]}"; do
   n=$(find "$H/$d" -type f ! -path '*__pycache__*' ! -name '*.pyc' 2>/dev/null | wc -l); e=${EXPECT[$d]}
