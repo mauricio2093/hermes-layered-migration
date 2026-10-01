@@ -4,8 +4,21 @@
 
 hermes:
   ported_from: "0.20.1"        # the old checkout (shallow, feature branch)
-  tested_against: "0.21.3"     # clean clone of main
-  upstream_ref: "6bea68a1de"
+  tested_against: "0.21.3+227 (2026.9.24)"   # upstream main merged into the carried branch
+  upstream_ref: "663362680b"
+  previous_upstream_ref: "e49a6afe"
+  # 2026-09-30: upstream/main merged into feat/layer2-schema (merge 5c9c52854b,
+  # fast-forwarded in production). One conflict file, plugins/platforms/telegram/
+  # adapter.py, 4 hunks, resolved by hand:
+  #   menu       Layer 2 publish gate kept; upstream's description cap and
+  #              fingerprint adopted
+  #   handlers   both sides' additions kept
+  #   rebuild    upstream fixed the same bug as 61479f3985 (plugin handlers on a
+  #              rebuilt Application); one implementation kept
+  #   send       copy-command buttons ported into upstream's new _send_chunks
+  # Tests on the merge: carried suites 147 passed; telegram gateway 735 passed,
+  # the 14 failures identical on pristine upstream (not caused by the merge).
+  # Config migration 35 -> 49 (delegation.max_iterations kept at 50 by choice).
 
 # Verdicts come from `git apply --reverse --check` against the clean clone:
 #   reverses cleanly -> already upstream, drop it
@@ -15,8 +28,8 @@ groups:
   telegram:
     count: 2
     port_status: applied
-    offline_validation: passed
-    live_validation: pending
+    offline_validation: passed      # re-validated on the 2026-09-30 merge
+    live_validation: pending        # copy-command buttons not yet seen on a real reply after the merge
     full_test_suite: not_run_due_to_resource_limit
     patches: patches/telegram/
     tests:
