@@ -58,7 +58,11 @@ fi
 # sin excepciones:
 #   shared-state.db       Hosted Rooms / coordinacion durable
 #   cron/deliveries.db    cola durable de entregas cron + tombstones
-DBS=(state.db verification_evidence.db kanban.db shared-state.db cron/executions.db cron/deliveries.db cron/notepad.db anchors/data/phone.db)
+# 8 -> 9 (2026-09-30). costs/prices.db: catalogo de precios del Cost Ledger
+# (hermes_control). Se regenera desde models.dev, pero guarda overrides de precio
+# hechos a mano y la fecha del catalogo con la que se congelaron los snapshots:
+# es estado, no cache. Mismo camino que las demas, sin excepciones.
+DBS=(state.db verification_evidence.db kanban.db shared-state.db cron/executions.db cron/deliveries.db cron/notepad.db anchors/data/phone.db costs/prices.db)
 SECRETS=(.env auth.json config.yaml channel_directory.json)
 
 ok_created=false; ok_archive=false; ok_db=false; ok_manifest=false; ok_restore=false
@@ -225,8 +229,8 @@ cat > "$DEST/RESTORE.md" <<EOF
     tar -xzf $(basename "$ARCHIVE") -C /destino
     # El tar trae las entradas de directorio, pero esto no cuesta nada y cubre
     # un destino donde cron/ o anchors/data/ no se hayan materializado:
-    mkdir -p /destino/$BASE/cron /destino/$BASE/anchors/data
-    # las DB NO están en el tar; copiarlas desde db-consistent/ (8):
+    mkdir -p /destino/$BASE/cron /destino/$BASE/anchors/data /destino/$BASE/costs
+    # las DB NO están en el tar; copiarlas desde db-consistent/ (9):
     cp db-consistent/state.db                  /destino/$BASE/state.db
     cp db-consistent/verification_evidence.db  /destino/$BASE/verification_evidence.db
     cp db-consistent/kanban.db                 /destino/$BASE/kanban.db
@@ -235,6 +239,7 @@ cat > "$DEST/RESTORE.md" <<EOF
     cp db-consistent/cron_deliveries.db        /destino/$BASE/cron/deliveries.db
     cp db-consistent/cron_notepad.db           /destino/$BASE/cron/notepad.db
     cp db-consistent/anchors_data_phone.db     /destino/$BASE/anchors/data/phone.db
+    cp db-consistent/costs_prices.db           /destino/$BASE/costs/prices.db
 
 Verificar antes: sha256sum -c MANIFEST.sha256
 EOF
