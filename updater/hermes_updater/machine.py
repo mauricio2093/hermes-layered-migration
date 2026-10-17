@@ -62,6 +62,7 @@ class Orchestrator:
         self.discover_kwargs = discover_kwargs or {}
         self.clock, self.sleep = clock, sleep
         self.enable_aux, self.enable_prepare = enable_aux, enable_prepare
+        self.daily_result: Optional[backup.BackupResult] = None
 
     # --- envoltorio comun ----------------------------------------------------------
     def _guarded(self, kind: str, trigger: str, body: Callable[[Store, int], Outcome]) -> tuple[Optional[int], Outcome]:
@@ -161,6 +162,12 @@ class Orchestrator:
         store.check(rid, "preflight", "hermes_maint", Verdict.PASS if maint.get("outcome") == "ok" else Verdict.NOT_OBSERVED,
                     required=False, detail=f"ultima observacion: {maint.get('outcome')} {maint.get('detail', '')}"[:300])
 
+        # Politica A: el backup diario va ANTES de mirar versiones. No depende de
+        # que haya red, de que haya actualizaciones ni de que la deteccion no
+        # falle: una excepcion en una fase posterior ya no puede impedirlo.
+        b = self._daily_backup(store, rid, res_ok)
+        self.daily_result = b
+
         self._to(store, rid, State.VERSION_DISCOVERY)
         vers = self.ops.discover(cfg, self.runner, **self.discover_kwargs)
         vd = {k: v.to_dict() for k, v in vers.items()}
@@ -179,7 +186,6 @@ class Orchestrator:
 
         if not aux_up and not hermes_up:
             self._to(store, rid, State.NO_UPDATES)
-            b = self._daily_backup(store, rid, res_ok)
             self._to(store, rid, State.NOTIFY_CURRENT_VERSIONS)
             day = time.strftime("%Y-%m-%d", time.localtime(self.clock()))
             notify.enqueue(store, rid, f"daily:{day}", "daily", report.daily_no_updates(
@@ -218,9 +224,8 @@ class Orchestrator:
             if hermes_up:
                 store.check(rid, "hermes", "preparation", Verdict.SKIPPED, required=False,
                             detail=skip_reason or ("recursos insuficientes" if not res_ok else "desactivado en esta ejecucion"))
-            b = self._daily_backup(store, rid, res_ok)
-            if b.verdict != Verdict.PASS:
-                outcome = Outcome.FAILED
+        if b.verdict != Verdict.PASS and outcome in (Outcome.SUCCESS, Outcome.PENDING_APPROVAL):
+            outcome = Outcome.FAILED
         self._to(store, rid, State.TELEGRAM_REPORT)
         self._to(store, rid, State.COMPLETE)
         if outcome == Outcome.SUCCESS and any(v.verdict != Verdict.PASS for v in vers.values()):
@@ -250,7 +255,11 @@ class Orchestrator:
         elif not res_ok:
             b = backup.BackupResult("daily", verdict=Verdict.BLOCKED, detail="recursos insuficientes")
         else:
-            b = self.ops.backup_daily(self.cfg, self.runner)
+            try:
+                b = self.ops.backup_daily(self.cfg, self.runner)
+            except Exception as exc:                          # noqa: BLE001 - se registra; la revision sigue
+                b = backup.BackupResult("daily", verdict=Verdict.FAIL,
+                                        detail=f"el backup lanzo {type(exc).__name__}: {exc}")
         store.check(rid, "backup", "daily", b.verdict, detail=b.detail, evidence=b.evidence_path)
         store.merge_data(rid, daily_backup=b.to_dict())
         if b.verdict == Verdict.PASS and b.backup_dir:
@@ -287,18 +296,14 @@ class Orchestrator:
 
         if inst.get("dirty_tracked"):
             store.check(rid, "hermes", "clean_tree", Verdict.BLOCKED, detail="checkout productivo con cambios sin commit")
-            self._daily_backup(store, rid, True)
             return block("PREFLIGHT", "el checkout productivo tiene cambios sin commit")
 
         self._to(store, rid, State.BACKUP)
-        b = self.ops.backup_preupdate(cfg, self.runner, versions=vd,
+        # El A de ESTA ejecucion (minutos de antiguedad, verificado) es el del
+        # pre-update: nunca uno de otro dia. Si fallo, el pre-update falla.
+        b = self.ops.backup_preupdate(cfg, self.runner, versions=vd, reuse_a=self.daily_result,
                                       upstream_ref=_upstream_base(cfg, self.runner, source, tgt["commit"]))
-        if b.backup_dir:
-            self._own_backup(store, rid, Path(b.backup_dir).name)
         store.merge_data(rid, preupdate_backup=b.to_dict())
-        # el backup A fresco tambien es el diario: hermes-maint lo vera
-        store.check(rid, "backup", "daily", Verdict(b.parts.get("backup_a", {}).get("verdict", "FAIL")),
-                    detail="backup A del pre-update")
         self._to(store, rid, State.BACKUP_VERIFICATION)
         store.check(rid, "backup", "pre_update", b.verdict, detail=b.detail, evidence=b.evidence_path)
         vchecks = (b.verification or {}).get("checks", {})
@@ -331,7 +336,7 @@ class Orchestrator:
 
         self._to(store, rid, State.COMPATIBILITY_TESTS)
         rep = verify.verify_backup(Path(b.backup_dir), hermes_home=cfg.hermes_home, work_dir=cfg.work_dir,
-                                   keep_restore=True)
+                                   keep_restore=True, prod_repo=cfg.prod_repo, gateway_unit=cfg.gateway_unit)
         restored = Path(rep.restored_to) / cfg.hermes_home.name if rep.restored_to else None
         try:
             carried_tests = sorted({f for c in cand.analysis.get("carried", []) for f in c["files"]

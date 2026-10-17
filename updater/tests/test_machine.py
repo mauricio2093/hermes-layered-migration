@@ -64,8 +64,8 @@ def test_dia_sin_actualizaciones(world, tmp_path):
     _up_to_date(world)
     rid, out = orch(world, tmp_path).daily("manual")
     assert out == Outcome.NO_UPDATES
-    assert _states(world, rid) == ["SCHEDULED", "PREFLIGHT", "VERSION_DISCOVERY", "UPDATE_CLASSIFICATION",
-                                   "NO_UPDATES", "DAILY_BACKUP", "NOTIFY_CURRENT_VERSIONS", "COMPLETE"]
+    assert _states(world, rid) == ["SCHEDULED", "PREFLIGHT", "DAILY_BACKUP", "VERSION_DISCOVERY",
+                                   "UPDATE_CLASSIFICATION", "NO_UPDATES", "NOTIFY_CURRENT_VERSIONS", "COMPLETE"]
     [msg] = _msgs(world)
     assert msg.startswith("HERMES — Revisión diaria")
     assert "Hermes: v0.2.0 — Actualizado" in msg and "Claude: 2.1.0 — Actualizado" in msg
@@ -373,3 +373,56 @@ def test_cli_codigos_de_salida(world, tmp_path, monkeypatch):
     assert cli.EXIT[Outcome.NO_UPDATES] == 0 and cli.EXIT[Outcome.PENDING_APPROVAL] == 4
     assert cli.EXIT[Outcome.RECOVERY_FAILED] == 9
     assert len(set(cli.EXIT[o] for o in (Outcome.BLOCKED, Outcome.FAILED, Outcome.ROLLED_BACK))) == 3
+
+
+# --- backup diario independiente de las actualizaciones ---------------------------
+
+def _daily_ok(world, rid):
+    s = Store(world.cfg.db_path)
+    try:
+        c = {(r["component"], r["name"]): r for r in s.checks(rid)}
+    finally:
+        s.close()
+    return c[("backup", "daily")]["verdict"]
+
+
+def test_backup_diario_aunque_la_deteccion_reviente(world, tmp_path):
+    def boom(*a, **k):
+        raise RuntimeError("deteccion rota")
+    rid, out = orch(world, tmp_path, ops=Ops(discover=boom)).daily("manual")
+    assert out == Outcome.FAILED
+    assert _daily_ok(world, rid) == "PASS"
+    assert _states(world, rid).index("DAILY_BACKUP") < len(_states(world, rid))
+
+
+def test_backup_diario_con_y_sin_actualizaciones_y_sin_red(world, tmp_path):
+    from hermes_updater.proc import Result
+    import urllib.error
+    rid1, _ = orch(world, tmp_path).daily("manual")              # hay actualizacion de Hermes
+    assert _daily_ok(world, rid1) == "PASS"
+    o = orch(world, tmp_path)
+    o.discover_kwargs["ls_remote"] = lambda: Result(("git",), 128, "Could not resolve host", 0.1)
+    o.discover_kwargs["fetch"] = lambda url: (_ for _ in ()).throw(urllib.error.URLError("sin red"))
+    rid2, _ = o.daily("manual")                                  # sin red
+    assert _daily_ok(world, rid2) == "PASS"
+    names = sorted(p.name for p in (world.home / "backups" / "independiente").iterdir())
+    assert len(names) >= 2
+
+
+def test_el_preupdate_reutiliza_el_backup_de_la_misma_ejecucion(world, tmp_path):
+    rid, out = orch(world, tmp_path).daily("manual")
+    assert out == Outcome.PENDING_APPROVAL
+    s = Store(world.cfg.db_path)
+    d = s.data(rid)
+    s.close()
+    assert d["preupdate_backup"]["parts"]["backup_a_reused"] is True
+    assert d["preupdate_backup"]["backup_dir"] == d["daily_backup"]["backup_dir"]
+    assert len(list((world.home / "backups" / "independiente").iterdir())) == 1   # un solo A
+
+
+def test_si_el_diario_falla_el_preupdate_no_se_inventa_otro(world, tmp_path):
+    import sqlite3
+    sqlite3.connect(world.home / "intrusa.sqlite").execute("create table t(x)").connection.commit()
+    rid, out = orch(world, tmp_path).daily("manual")
+    assert out == Outcome.FAILED
+    assert "STAGING_PREPARATION" not in _states(world, rid)

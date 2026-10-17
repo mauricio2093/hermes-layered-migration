@@ -84,8 +84,10 @@ def make_hermes_home(base: Path) -> Path:
             c.execute("create table t(x)")
         c.commit()
         c.close()
-    (h / "backup-declarations.sh").write_text(
-        "DECL_PLUGINS=(" + " ".join(PLUGINS) + ")\nDECL_SCRIPTS=(" + " ".join(SCRIPTS) + ")\n")
+    lists = {"DECL_PLUGINS": PLUGINS, "DECL_SCRIPTS": SCRIPTS,
+             "DECL_PATCHES": [f"f{i}" for i in range(6)], "DECL_ANCHORS": [f"f{i}" for i in range(27)],
+             "DECL_VOICE": [f"f{i}" for i in range(7)], "DECL_SQLITE_COLD": []}
+    (h / "backup-declarations.sh").write_text("".join(f"{k}=({' '.join(v)})\n" for k, v in lists.items()))
     for f in (".env", "auth.json", "config.yaml", "channel_directory.json"):
         (h / f).write_text("FAKE_TOKEN=no-es-real\n" if f == ".env" else "{}\n")
         os.chmod(h / f, 0o600)
@@ -194,6 +196,11 @@ class ScriptedRunner(Runner):
 @pytest.fixture
 def world(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_UPDATER_NO_SCOPE", "1")
+    # el script de backup registra el estado del host: en los tests, el del
+    # mundo aislado (python con pip, repos y HOME del fixture), nunca el real
+    monkeypatch.setenv("HERMES_PROD_PYTHON", sys.executable)
+    monkeypatch.setenv("HERMES_EXTRA_REPOS", str(tmp_path / "prod"))
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
     for k, v in ID.items():
         monkeypatch.setenv(k, v)
     monkeypatch.delenv("CLAUDECODE", raising=False)

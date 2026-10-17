@@ -81,6 +81,9 @@ def run_backup_a(cfg: Config, runner: Runner, *, dest_root: Optional[Path] = Non
     tmp.mkdir(parents=True, exist_ok=True)
     r = runner.run(["bash", str(cfg.backup_script)], timeout=cfg.policy.backup_timeout_s,
                    env={"HERMES_HOME": str(cfg.hermes_home), "BACKUP_ROOT": str(dest_root),
+                        # lo que vive fuera de HERMES_HOME (estado del host)
+                        "HERMES_PROD_REPO": str(cfg.prod_repo), "HERMES_SYSTEMD_USER_DIR": str(cfg.systemd_user_dir),
+                        "HERMES_GATEWAY_UNIT": cfg.gateway_unit,
                         # el restore temporal del script, a disco: /tmp es tmpfs (RAM)
                         "TMPDIR": str(tmp)})
     res.log_tail = r.tail(4000)
@@ -92,7 +95,8 @@ def run_backup_a(cfg: Config, runner: Runner, *, dest_root: Optional[Path] = Non
     bdir = new[-1]
     res.backup_dir = str(bdir)
     res.script_claim = verify.script_claims_verified(bdir)
-    rep = verify.verify_backup(bdir, hermes_home=cfg.hermes_home, work_dir=cfg.work_dir)
+    rep = verify.verify_backup(bdir, hermes_home=cfg.hermes_home, work_dir=cfg.work_dir,
+                               prod_repo=cfg.prod_repo, gateway_unit=cfg.gateway_unit)
     res.verification = rep.to_dict()
     res.evidence_path = str(verify.write_evidence(rep, cfg.evidence_dir))
     # Las dos cosas: el script dice que si Y la verificacion independiente pasa.
@@ -209,7 +213,9 @@ def write_manifest(d: Path) -> str:
 
 
 def run_preupdate(cfg: Config, runner: Runner, *, upstream_ref: Optional[str], versions: dict,
-                  ts: Optional[str] = None) -> BackupResult:
+                  ts: Optional[str] = None, reuse_a: Optional[BackupResult] = None) -> BackupResult:
+    """``reuse_a``: el backup A hecho al empezar ESTA ejecucion. Se reutiliza solo
+    si es de este proceso y no tiene mas de 2 h; si no, se hace uno nuevo."""
     res = BackupResult("pre-update")
     ts = ts or time.strftime("%Y%m%d-%H%M%S")
     out = Path(cfg.preupdate_backups) / ts
@@ -217,7 +223,10 @@ def run_preupdate(cfg: Config, runner: Runner, *, upstream_ref: Optional[str], v
     os.chmod(out, 0o700)
     res.bundle_dir = str(out)
 
-    a = run_backup_a(cfg, runner, kind="pre-update")      # fresco, en independiente/
+    fresh = (reuse_a is not None and reuse_a.backup_dir is not None
+             and time.time() - Path(reuse_a.backup_dir).stat().st_mtime < 2 * 3600)
+    a = reuse_a if fresh else run_backup_a(cfg, runner, kind="pre-update")
+    res.parts["backup_a_reused"] = bool(fresh)
     res.backup_dir, res.verification = a.backup_dir, a.verification
     res.script_claim, res.evidence_path = a.script_claim, a.evidence_path
     res.parts["backup_a"] = {"verdict": a.verdict.value, "detail": a.detail, "dir": a.backup_dir}

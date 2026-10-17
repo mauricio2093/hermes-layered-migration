@@ -40,15 +40,19 @@ from typing import Iterable, Optional
 
 from .status import Verdict, worst
 
-#: Lo mismo que excluye backup-hermes-home.sh de la busqueda de bases: copias
-#: de seguridad, rescates, checkouts de codigo y caches.
-DB_SCAN_EXCLUDE = ("backups", "rescue", "hermes-agent", "hermes-oficial-clean", "cache")
+#: Cobertura del tar de backup-hermes-home.sh (EXCLUDE_TOP / EXCLUDE_SUB). Copia
+#: deliberada: este modulo no lee el script para decidir, y un test exige que
+#: las dos definiciones coincidan.
+EXCLUDE_TOP = ("backups", "rescue", "hermes-oficial-clean", "node", "lsp", "cache", "audio_cache")
+EXCLUDE_SUB = ("hermes-agent/venv", "hermes-agent/.git", "hermes-agent/node_modules")
+SQLITE_MAGIC = b"SQLite format 3\x00"
 
 #: Sin esto, el restaurado no es un Hermes recuperable.
-CRITICAL_PATHS = ("config.yaml", ".env", "auth.json", "SOUL.md", "memories", "skills",
-                  "cron", "plugins", "scripts")
+CRITICAL_PATHS = ("config.yaml", ".env", "auth.json", "SOUL.md", "memories", "skills", "cron",
+                  "plugins", "scripts", "patches", "anchors", "voice-samples", "hermes-control", "costs")
 
-CONTENT_DIRS = ("plugins", "scripts")
+CONTENT_DIRS = ("plugins", "scripts", "patches", "anchors", "voice-samples")
+_LIVE_DB_SUFFIX = (".db", ".db-wal", ".db-shm")
 
 
 def sha256_file(p: Path) -> str:
@@ -64,22 +68,36 @@ def flat(rel: str) -> str:
 
 
 def live_databases(hermes_home: Path) -> list[str]:
-    """Bases *.db del Hermes vivo, rutas relativas, con las mismas exclusiones
-    de nivel superior que el script. Descubiertas aqui, no leidas del script."""
+    """Toda base SQLite del Hermes vivo, POR CONTENIDO (cabecera), sobre la
+    misma cobertura que el tar. Descubiertas aqui, no leidas del script: una
+    base llamada x.sqlite o state.db.bak-N cuenta igual que state.db."""
     out = []
     for root, dirs, files in os.walk(hermes_home):
-        rel_root = Path(root).relative_to(hermes_home)
-        if rel_root == Path("."):
-            dirs[:] = [d for d in dirs if d not in DB_SCAN_EXCLUDE]
+        rel = os.path.relpath(root, hermes_home)
+        keep = []
+        for d in dirs:
+            r = d if rel == "." else f"{rel}/{d}"
+            if (rel == "." and d in EXCLUDE_TOP) or r in EXCLUDE_SUB or d == "__pycache__":
+                continue
+            keep.append(d)
+        dirs[:] = keep
         for f in files:
-            if f.endswith(".db"):
-                out.append(str((rel_root / f)) if str(rel_root) != "." else f)
+            p = os.path.join(root, f)
+            try:
+                if os.path.islink(p) or os.path.getsize(p) < 100:
+                    continue
+                with open(p, "rb") as fh:
+                    if fh.read(16) != SQLITE_MAGIC:
+                        continue
+            except OSError:
+                continue
+            out.append(os.path.relpath(p, hermes_home))
     return sorted(out)
 
 
-def _sqlite_checks(p: Path) -> dict:
+def _sqlite_checks(p: Path, *, immutable: bool = False) -> dict:
     try:
-        c = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+        c = sqlite3.connect(f"file:{p}?mode=ro{'&immutable=1' if immutable else ''}", uri=True)
         try:
             quick = c.execute("PRAGMA quick_check").fetchone()[0]
             integ = c.execute("PRAGMA integrity_check").fetchone()[0]
@@ -141,7 +159,8 @@ def _safe_member(m: tarfile.TarInfo) -> Optional[str]:
 
 
 def verify_backup(backup_dir: Path, *, hermes_home: Path, work_dir: Path,
-                  keep_restore: bool = False, critical: Iterable[str] = CRITICAL_PATHS) -> Report:
+                  keep_restore: bool = False, critical: Iterable[str] = CRITICAL_PATHS,
+                  prod_repo: Optional[Path] = None, gateway_unit: str = "hermes-gateway.service") -> Report:
     rep = Report(str(backup_dir))
     backup_dir = Path(backup_dir)
 
@@ -179,7 +198,7 @@ def verify_backup(backup_dir: Path, *, hermes_home: Path, work_dir: Path,
         rep.finished_at = time.time()
         return rep
     archive = archives[0]
-    members_bad, hot_dbs, top, abs_links = [], [], set(), 0
+    members_bad, hot_dbs, top, abs_links, names = [], [], set(), 0, set()
     try:
         with tarfile.open(archive, "r:gz") as tf:
             members = tf.getmembers()       # lee el archivo ENTERO: detecta truncado
@@ -189,7 +208,8 @@ def verify_backup(backup_dir: Path, *, hermes_home: Path, work_dir: Path,
                     members_bad.append(f"{m.name}: {why}")
                 if m.issym() and m.linkname.startswith("/"):
                     abs_links += 1
-                if m.name.endswith((".db", ".db-wal", ".db-shm")):
+                names.add(m.name)
+                if m.name.endswith(_LIVE_DB_SUFFIX):
                     hot_dbs.append(m.name)
                 top.add(Path(m.name).parts[0])
     except (tarfile.TarError, OSError, EOFError) as exc:
@@ -203,21 +223,34 @@ def verify_backup(backup_dir: Path, *, hermes_home: Path, work_dir: Path,
             members=len(members), absolute_symlinks=abs_links)
     base = next(iter(top)) if len(top) == 1 else None
 
-    # 3. inventario de bases (descubierto en el vivo)
-    live = live_databases(hermes_home)
+    # 3. inventario de bases (descubierto en el vivo, por contenido)
+    found = live_databases(hermes_home)
     dbdir = backup_dir / "db-consistent"
     have = sorted(p.name for p in dbdir.glob("*.db")) if dbdir.is_dir() else []
-    want = sorted(flat(x) for x in live)
-    missing = sorted(set(want) - set(have))
-    extra = sorted(set(have) - set(want))
+    base0 = next(iter(top)) if len(top) == 1 else ""
+    live, cold, missing, hot_cold = [], [], [], []
+    for rel in found:
+        if flat(rel) in have:
+            live.append(rel)                     # viva: copia consistente
+        elif f"{base0}/{rel}" in names:
+            wal = hermes_home / (rel + "-wal")
+            if (wal.exists() and wal.stat().st_size > 0) or (hermes_home / (rel + "-journal")).exists():
+                hot_cold.append(rel)             # viaja en el tar pero tiene escritor
+            else:
+                cold.append(rel)                 # archivada: viaja en el tar
+        else:
+            missing.append(rel)
+    extra = sorted(set(have) - {flat(x) for x in live})
     det = []
     if missing:
-        det.append("bases vivas SIN copia (no inventariadas): " + ", ".join(missing))
+        det.append("bases SQLite vivas que NO estan en el backup: " + ", ".join(missing))
+    if hot_cold:
+        det.append("bases con WAL activo copiadas en caliente por tar: " + ", ".join(hot_cold))
     if extra:
         det.append("copias sin base viva: " + ", ".join(extra))
-    rep.add("db_inventory", Verdict.FAIL if missing else Verdict.PASS,
-            "; ".join(det) or f"{len(live)} bases vivas, todas con copia consistente",
-            live=live, copies=have)
+    rep.add("db_inventory", Verdict.FAIL if (missing or hot_cold) else Verdict.PASS,
+            "; ".join(det) or f"{len(found)} bases SQLite: {len(live)} con copia consistente, {len(cold)} archivadas en el tar",
+            live=live, cold=cold, copies=have)
 
     # 4-7. restauracion aislada
     if base is None:
@@ -239,6 +272,7 @@ def verify_backup(backup_dir: Path, *, hermes_home: Path, work_dir: Path,
         home = rdir / base
         # bases: a su ruta, desde db-consistent (la fuente autoritativa)
         db_results, db_bad = {}, []
+        live_placed = set(live)
         for rel in live:
             src = dbdir / flat(rel)
             if not src.is_file():
@@ -250,6 +284,11 @@ def verify_backup(backup_dir: Path, *, hermes_home: Path, work_dir: Path,
             db_results[rel] = r
             if not r.get("ok"):
                 db_bad.append(f"{rel}: {r.get('error') or r.get('integrity_check')}")
+        for rel in cold:     # archivadas: la copia RESTAURADA desde el tar debe abrir
+            r = _sqlite_checks(home / rel, immutable=True)
+            db_results[rel] = {**r, "kind": "archivada"}
+            if not r.get("ok"):
+                db_bad.append(f"{rel} (archivada): {r.get('error') or r.get('integrity_check')}")
         for name in extra:   # copias sin base viva: tambien deben abrir
             r = _sqlite_checks(dbdir / name)
             db_results[name] = r
@@ -270,13 +309,18 @@ def verify_backup(backup_dir: Path, *, hermes_home: Path, work_dir: Path,
             got = {}
             for d in CONTENT_DIRS:
                 for p in (home / d).rglob("*") if (home / d).exists() else []:
+                    rel_p = str(p.relative_to(home))
+                    # fuera solo las bases vivas que ESTE verificador coloco desde
+                    # db-consistent (y sus -wal/-shm), por ruta exacta, nunca por patron
+                    if rel_p in live_placed or rel_p.removesuffix("-wal").removesuffix("-shm") in live_placed:
+                        continue
                     if p.is_file() and "__pycache__" not in p.parts and not p.name.endswith(".pyc"):
                         got[str(p.relative_to(home))] = sha256_file(p)
             diff = [f"falta {n}" for n in exp if n not in got] + \
                    [f"sobra {n}" for n in got if n not in exp] + \
                    [f"distinto {n}" for n in exp if n in got and got[n] != exp[n]]
             rep.add("restore_content", Verdict.FAIL if diff else Verdict.PASS,
-                    "; ".join(diff[:8]) or f"{len(exp)} ficheros de plugins/ y scripts/ identicos")
+                    "; ".join(diff[:8]) or f"{len(exp)} ficheros declarados ({', '.join(CONTENT_DIRS)}) identicos")
         else:
             rep.add("restore_content", Verdict.FAIL, "falta content-manifest.sha256")
 
@@ -298,6 +342,7 @@ def verify_backup(backup_dir: Path, *, hermes_home: Path, work_dir: Path,
         else:
             rep.add("restore_permissions", Verdict.FAIL, "falta perms-esperados.txt")
 
+        _check_host(rep, backup_dir / "host", prod_repo=prod_repo, gateway_unit=gateway_unit)
         miss = [c for c in critical if not (home / c).exists()]
         rep.add("restore_critical_paths", Verdict.FAIL if miss else Verdict.PASS,
                 ("faltan: " + ", ".join(miss)) if miss else f"{len(tuple(critical))} rutas criticas presentes")
@@ -309,6 +354,65 @@ def verify_backup(backup_dir: Path, *, hermes_home: Path, work_dir: Path,
             rep.restored_to = None
     rep.finished_at = time.time()
     return rep
+
+
+def _check_host(rep: Report, host: Path, *, prod_repo: Optional[Path], gateway_unit: str) -> None:
+    """Lo necesario para reconstruir el Hermes que usa los datos: codigo
+    propio, dependencias y servicio. Comprobado aqui, no creido del script."""
+    import subprocess
+    if not host.is_dir():
+        rep.add("host_state", Verdict.FAIL, "el backup no trae host/ (codigo propio, venv, units)")
+        return
+    bad, ok = [], []
+    unit = host / "systemd" / gateway_unit
+    dropins = sorted((host / "systemd" / f"{gateway_unit}.d").glob("*.conf"))
+    (ok if unit.is_file() else bad).append(f"unit {gateway_unit}" + ("" if unit.is_file() else " AUSENTE"))
+    if dropins:
+        ok.append(f"{len(dropins)} drop-in(s)")
+    refs = {}
+    if (host / "prod-refs.txt").is_file():
+        for line in (host / "prod-refs.txt").read_text().splitlines():
+            k, _, v = line.partition(" ")
+            refs[k] = v.strip()
+    bundle = host / "carried.bundle"
+    if bundle.is_file():
+        heads = subprocess.run(["git", "bundle", "list-heads", str(bundle)], capture_output=True, text=True, timeout=120)
+        head_ok = heads.returncode == 0 and refs.get("HEAD", "?") in heads.stdout
+        (ok if head_ok else bad).append("bundle con el HEAD registrado" if head_ok else "el bundle no contiene el HEAD registrado")
+        if prod_repo is not None and Path(prod_repo, ".git").exists():
+            v = subprocess.run(["git", "-C", str(prod_repo), "bundle", "verify", str(bundle)],
+                               capture_output=True, text=True, timeout=300)
+            (ok if v.returncode == 0 else bad).append("git bundle verify ok" if v.returncode == 0
+                                                       else "git bundle verify FALLA")
+    else:
+        bad.append("sin carried.bundle (commits propios)")
+    fr = host / "venv-freeze.txt"
+    (ok if fr.is_file() and fr.stat().st_size > 0 else bad).append(
+        f"pip freeze {len(fr.read_text().splitlines())} paquetes" if fr.is_file() and fr.stat().st_size > 0 else "sin pip freeze")
+    wheels = sorted((host / "wheels").glob("*.whl")) if (host / "wheels").is_dir() else []
+    installed = {}
+    if prod_repo is not None:
+        for du in Path(prod_repo, ".venv").glob("lib/python*/site-packages/*.dist-info/direct_url.json"):
+            try:
+                d = json.loads(du.read_text())
+            except (OSError, ValueError):
+                continue
+            if d.get("url", "").startswith("file://") and "archive_info" in d:
+                installed[Path(d["url"][7:]).name] = (d["archive_info"].get("hashes") or {}).get("sha256")
+    for name, want in installed.items():
+        w = host / "wheels" / name
+        if not w.is_file():
+            bad.append(f"falta el wheel local instalado {name}")
+        elif want and sha256_file(w) != want:
+            bad.append(f"wheel {name} distinto del instalado")
+        else:
+            ok.append(f"wheel {name} = sha256 instalado")
+    for w in wheels:
+        if w.name not in installed:
+            ok.append(f"wheel {w.name} sha256 {sha256_file(w)[:12]} (no contrastado)")
+    (ok if (host / "crontab.txt").is_file() else bad).append("crontab" if (host / "crontab.txt").is_file() else "sin crontab.txt")
+    rep.add("host_state", Verdict.FAIL if bad else Verdict.PASS, "; ".join(bad) if bad else "; ".join(ok),
+            wheels=[w.name for w in wheels])
 
 
 def write_evidence(rep: Report, evidence_dir: Path) -> Path:

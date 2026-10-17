@@ -163,3 +163,72 @@ def test_preupdate_falla_si_produccion_tiene_cambios_sin_commit(world):
     b = backup.run_preupdate(world.cfg, world.runner, upstream_ref=world.base, versions={})
     assert b.verdict == Verdict.FAIL
     assert "sin commit" in b.detail
+
+
+def _retar(d: Path, mutate):
+    """Rehace el archivo tras `mutate(raiz_extraida)` y rehace el MANIFEST:
+    el peor caso, alguien que sabe recalcular los hashes."""
+    import tarfile
+    arch = next(d.glob("hermes-home-*.tar.gz"))
+    tmp = d.parent / (d.name + "-x")
+    with tarfile.open(arch) as tf:
+        tf.extractall(tmp, filter="tar")
+    mutate(tmp)
+    with tarfile.open(arch, "w:gz") as tf:
+        for child in tmp.iterdir():
+            tf.add(child, arcname=child.name)
+    shutil.rmtree(tmp)
+    backup.write_manifest(d)
+
+
+def test_base_archivada_corrupta_dentro_del_archivo(world):
+    c = sqlite3.connect(world.home / "state.db.bak-1")
+    c.execute("create table t(x)")
+    c.executemany("insert into t values (?)", [(i,) for i in range(2000)])
+    c.commit()
+    c.close()
+    decl = (world.home / "backup-declarations.sh").read_text().replace("DECL_SQLITE_COLD=()", "DECL_SQLITE_COLD=(state.db.bak-1)")
+    (world.home / "backup-declarations.sh").write_text(decl)
+    b = _daily(world)
+    assert b.verdict == Verdict.PASS, b.detail
+    assert b.verification["checks"]["restore_databases"]["databases"]["state.db.bak-1"]["kind"] == "archivada"
+
+    def corrupt(root):
+        p = root / ".hermes" / "state.db.bak-1"
+        data = bytearray(p.read_bytes())
+        for i in range(4096, len(data), 97):
+            data[i] = 0xAA
+        p.write_bytes(bytes(data))
+    _retar(Path(b.backup_dir), corrupt)
+    rep = verify.verify_backup(Path(b.backup_dir), hermes_home=world.home, work_dir=world.cfg.work_dir,
+                               prod_repo=world.prod)
+    assert rep.checks["manifest"]["verdict"] == "PASS"
+    assert rep.checks["restore_databases"]["verdict"] == "FAIL"
+    assert "archivada" in rep.checks["restore_databases"]["detail"]
+
+
+def test_host_sin_bundle_de_commits_propios(world):
+    b = _daily(world)
+    d = Path(b.backup_dir)
+    (d / "host" / "carried.bundle").unlink()
+    backup.write_manifest(d)
+    rep = verify.verify_backup(d, hermes_home=world.home, work_dir=world.cfg.work_dir, prod_repo=world.prod)
+    assert rep.checks["host_state"]["verdict"] == "FAIL"
+    assert "carried.bundle" in rep.checks["host_state"]["detail"]
+
+
+def test_host_con_wheel_distinto_del_instalado(world, tmp_path):
+    """El wheel copiado debe ser el que el venv productivo registra como instalado."""
+    import json as _json
+    b = _daily(world)
+    d = Path(b.backup_dir)
+    di = world.prod / ".venv" / "lib" / "python3.11" / "site-packages" / "x-1.dist-info"
+    di.mkdir(parents=True)
+    (di / "direct_url.json").write_text(_json.dumps({"url": "file:///w/x-1-py3-none-any.whl",
+                                                     "archive_info": {"hashes": {"sha256": "0" * 64}}}))
+    (d / "host" / "wheels").mkdir(exist_ok=True)
+    (d / "host" / "wheels" / "x-1-py3-none-any.whl").write_bytes(b"otro contenido")
+    backup.write_manifest(d)
+    rep = verify.verify_backup(d, hermes_home=world.home, work_dir=world.cfg.work_dir, prod_repo=world.prod)
+    assert rep.checks["host_state"]["verdict"] == "FAIL"
+    assert "distinto del instalado" in rep.checks["host_state"]["detail"]

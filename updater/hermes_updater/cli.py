@@ -90,7 +90,8 @@ def main(argv=None) -> int:
     if args.cmd == "backup":
         config.ensure_dirs(cfg)
         if args.verify:
-            rep = verify.verify_backup(args.verify, hermes_home=cfg.hermes_home, work_dir=cfg.work_dir)
+            rep = verify.verify_backup(args.verify, hermes_home=cfg.hermes_home, work_dir=cfg.work_dir,
+                                       prod_repo=cfg.prod_repo, gateway_unit=cfg.gateway_unit)
             print(json.dumps(rep.to_dict(), indent=2, default=str))
             return 0 if rep.verdict.value == "PASS" else 7
         res = backup.run_backup_a(cfg, runner)
