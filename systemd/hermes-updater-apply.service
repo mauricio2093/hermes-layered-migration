@@ -1,0 +1,14 @@
+[Unit]
+Description=Apply an approved Hermes update candidate (controlled cutover with rollback)
+Documentation=https://github.com/mauricio2093/hermes-layered-migration/blob/main/docs/updater.md
+
+[Service]
+Type=oneshot
+Environment=HERMES_HOME=%h/.hermes
+ExecStart=%h/.local/bin/hermes-updater apply
+# 6 = no habia aprobacion valida (p. ej. el path se disparo por otro motivo):
+# se registra, no se reintenta solo.
+TimeoutStartSec=45min
+UMask=0077
+MemoryMax=1500M
+NoNewPrivileges=yes

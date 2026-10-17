@@ -1,0 +1,15 @@
+[Unit]
+Description=Daily Hermes maintenance orchestrator run
+Documentation=https://github.com/mauricio2093/hermes-layered-migration/blob/main/docs/updater.md
+
+[Timer]
+# 04:15: despues de hermes-maint (03:00 + hasta 5 min), que observa la
+# frescura del backup que este crea. Locks distintos y sin dependencia:
+# hermes-maint es de solo lectura, no hay conflicto aunque se solapen.
+OnCalendar=*-*-* 04:15:00
+Persistent=true
+RandomizedDelaySec=600
+AccuracySec=1m
+
+[Install]
+WantedBy=timers.target

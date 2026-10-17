@@ -1,0 +1,29 @@
+[Unit]
+Description=Hermes maintenance orchestrator (versions, daily backup, candidate preparation)
+Documentation=https://github.com/mauricio2093/hermes-layered-migration/blob/main/docs/updater.md
+# Sin Wants=/Requires= sobre hermes-gateway.service: igual que hermes-maint,
+# tiene que poder informar de un gateway caido, no levantarlo a escondidas.
+# Esta ejecucion NUNCA modifica produccion: solo apply (otra unit) lo hace.
+
+[Service]
+Type=oneshot
+Environment=HERMES_HOME=%h/.hermes
+ExecStart=%h/.local/bin/hermes-updater run --trigger timer
+# 3 = otra ejecucion tiene el candado (el candado funcionando).
+# 4 = candidato preparado y PENDIENTE de aprobacion: es el resultado esperado
+#     de un dia con actualizacion de Hermes, no un fallo.
+# 6 BLOCKED, 7 FAILED y el resto son hallazgos y deben verse en rojo.
+SuccessExitStatus=3 4
+# Preparar un candidato (venv + ~2000 tests + suite de hermes-control) tarda
+# 30-90 min en este equipo. 3 h acota un cuelgue; cada fase tiene su timeout.
+TimeoutStartSec=3h
+UMask=0077
+Nice=10
+IOSchedulingClass=idle
+# Las suites corren en su propio scope (systemd-run --scope, MemoryMax=1800M);
+# este limite cubre al orquestador y a pip/git.
+MemoryMax=2G
+NoNewPrivileges=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# Sin [Install]: lo activa el timer.

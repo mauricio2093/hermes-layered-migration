@@ -1,0 +1,13 @@
+[Unit]
+Description=Start the approved Hermes update when the root helper records a TOTP approval
+Documentation=https://github.com/mauricio2093/hermes-layered-migration/blob/main/docs/updater.md
+
+[Path]
+# Solo root escribe aqui (hermes-priv-helper update-approve, tras verificar TOTP).
+# Que se dispare no autoriza nada: apply vuelve a comprobar la aprobacion
+# entera (dueño root, codigo del candidato, caducidad, un solo uso).
+PathChanged=/var/lib/hermes-update-approvals
+Unit=hermes-updater-apply.service
+
+[Install]
+WantedBy=paths.target
