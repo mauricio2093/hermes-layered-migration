@@ -17,7 +17,7 @@ PLUGINS = ["hostinger-commands", "model-providers/onion", "voicestudio-tts"]
 SCRIPTS = ["backup-hermes-home.sh", "cutover.sh", "rollback.sh", "alerta-a.sh", "alerta-b.sh"]
 DBS = ["state.db", "verification_evidence.db", "kanban.db", "shared-state.db",
        "cron/executions.db", "cron/deliveries.db", "cron/notepad.db", "anchors/data/phone.db",
-       "costs/prices.db"]
+       "costs/prices.db", "hermes-control/gifs.db"]
 
 
 def hermes_home(tmp_path) -> pathlib.Path:
