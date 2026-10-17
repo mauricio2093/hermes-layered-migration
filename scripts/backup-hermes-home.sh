@@ -16,39 +16,45 @@ TS="$(date +%Y%m%d-%H%M%S)"
 # defecto, el de siempre: es el que lee hermes-maint/backup-freshness.
 DEST="${BACKUP_ROOT:-$HERMES_HOME/backups/independiente}/$TS"
 DBDIR="$DEST/db-consistent"
+HOSTDIR="$DEST/host"
 ARCHIVE="$DEST/hermes-home-$TS.tar.gz"
 STATE="$DEST/state.json"
+# Lo que vive FUERA de HERMES_HOME y hace falta para reconstruir Hermes.
+# Sobrescribibles solo para los tests (un HERMES_HOME falso con su propio
+# checkout y su propio directorio de units).
+PROD_REPO="${HERMES_PROD_REPO:-$HERMES_HOME/hermes-oficial-clean}"
+SYSTEMD_USER_DIR="${HERMES_SYSTEMD_USER_DIR:-$HOME/.config/systemd/user}"
+GATEWAY_UNIT="${HERMES_GATEWAY_UNIT:-hermes-gateway.service}"
+PROD_PYTHON="${HERMES_PROD_PYTHON:-$PROD_REPO/.venv/bin/python}"
+EXTRA_REPOS="${HERMES_EXTRA_REPOS:-$HOME/repos/hermes-control $HOME/repos/hermes-layered-migration}"
 
-# Conteos de FICHEROS FUENTE (sin __pycache__/*.pyc, que el tar excluye).
-# Revisados a mano 2026-09-18. Si cambian legítimamente, actualizar aquí
-# conscientemente: son la defensa contra un glob que respalde media instalación.
-# anchors=27: sus 28 fuentes menos anchors/data/phone.db, que viaja en db-consistent/.
+# --- Declaraciones POR NOMBRE ------------------------------------------------
+# Historia: plugins/ y scripts/ pasaron de recuento a nombre + sha256 el
+# 2026-09-27; patches/, anchors/ y voice-samples/ el 2026-10-16.
 #
-# scripts 5 -> 8 (2026-09-18, BACKUP-DECL-006). Los tres nuevos se verificaron
-# uno a uno contra el tar del ultimo backup verificado (20260916-182215), que
-# contenia exactamente los cinco anteriores:
-#   cutover.sh       corte del gateway fosil -> clon limpio
-#   push-limpio.sh   publicacion de la historia limpia
-#   rollback.sh      la herramienta de recuperacion; ninguna razon la justifica
-#                    mas que esta para estar dentro del backup
-# Los tres son bash escrito a mano, 0700, sin secretos. Ninguno es temporal,
-# generado, cache ni artefacto de pruebas.
-declare -A EXPECT=( [patches]=6 [anchors]=27 [voice-samples]=7 )
-# plugins y scripts: POR NOMBRE, con manifiesto sha256 (2026-09-27).
-# El recuento no distinguia un fichero perdido compensado por uno nuevo, no veia
-# la corrupcion, y fallaba con cualquier cambio legitimo (instalar un plugin
-# revisado subia plugins de 6 a 19). Ahora:
-#   - se declaran los NOMBRES: un plugin (dir con plugin.yaml) o script no
-#     declarado aborta, igual que una base no declarada; añadirlo es haberlo
-#     revisado;
+# El recuento (patches=6 anchors=27 voice-samples=7) no distinguia un fichero
+# perdido compensado por uno nuevo, no veia la corrupcion, y fallaba con
+# cualquier cambio legitimo: el 2026-10-16 anchors tenia 30 (tres documentos
+# de anclaje nuevos, del 3 y del 12 de octubre) y la unica salida era subir el
+# numero sin mirar. Ahora:
+#   - se declaran los NOMBRES; uno no declarado aborta, igual que una base no
+#     declarada. Declararlo es haberlo revisado;
 #   - el contenido viaja con content-manifest.sha256, y el restore lo comprueba
 #     en las dos direcciones: nada falta, nada sobra, nada cambia.
 # Los nombres viven FUERA de este repo, en $HERMES_HOME/backup-declarations.sh
 # (dentro del backup): son de la instalacion, no del codigo, y este repo es
-# publico. Sin ese fichero no hay declaracion, y el backup no se da por bueno.
-CONTENT_DIRS=(plugins scripts)
+# publico. Sin ese fichero, o sin una de sus listas, no hay declaracion y el
+# backup no se da por bueno.
+#
+#   DECL_PLUGINS        plugins/<nombre> (directorios con plugin.yaml)
+#   DECL_SCRIPTS        ficheros de scripts/
+#   DECL_PATCHES        ficheros de patches/
+#   DECL_ANCHORS        ficheros de anchors/ (sin bases: van en db-consistent/)
+#   DECL_VOICE          ficheros de voice-samples/
+#   DECL_SQLITE_COLD    bases SQLite ARCHIVADAS (no vivas) que viajan en el tar
+#                       tal cual, p. ej. state.db.bak-3504 de una migracion
+CONTENT_DIRS=(plugins scripts patches anchors voice-samples)
 DECL_FILE="$HERMES_HOME/backup-declarations.sh"
-DECL_PLUGINS=(); DECL_SCRIPTS=()
 if [ -f "$DECL_FILE" ]; then
   # shellcheck source=/dev/null
   . "$DECL_FILE"
@@ -71,12 +77,26 @@ fi
 DBS=(state.db verification_evidence.db kanban.db shared-state.db cron/executions.db cron/deliveries.db cron/notepad.db anchors/data/phone.db costs/prices.db hermes-control/gifs.db)
 SECRETS=(.env auth.json config.yaml channel_directory.json)
 
-ok_created=false; ok_archive=false; ok_db=false; ok_manifest=false; ok_restore=false
+# --- Cobertura: UNA sola definicion para el tar y para el inventario ----------
+# Antes el tar excluia una lista y la busqueda de bases otra (p. ej. el tar
+# metia hermes-agent/ pero la busqueda lo saltaba): una base ahi dentro habria
+# faltado sin aviso. Ahora las dos salen de aqui. El verificador independiente
+# (hermes_updater/verify.py) tiene su copia y un test exige que coincidan.
+EXCLUDE_TOP=(backups rescue hermes-oficial-clean node lsp cache audio_cache)
+EXCLUDE_SUB=(hermes-agent/venv hermes-agent/.git hermes-agent/node_modules)
+
+ok_created=false; ok_archive=false; ok_db=false; ok_manifest=false; ok_restore=false; ok_host=false
 decl_ok=true
 step() { echo; echo "── $* ──"; }
 # El mismo filtro en el vivo, en el manifiesto y en el restore: lo que el tar
-# excluye (__pycache__, *.pyc) no cuenta en ninguno de los tres.
-content_files() { ( cd "$1" && find "${CONTENT_DIRS[@]}" -type f ! -path '*__pycache__*' ! -name '*.pyc' 2>/dev/null | LC_ALL=C sort ); }
+# excluye a proposito (__pycache__, *.pyc) no cuenta en ninguno de los tres.
+# Las bases VIVAS declaradas (anchors/data/phone.db) tampoco: viajan en
+# db-consistent/. Se excluyen por RUTA EXACTA, nunca por patron: un "x.db"
+# que no sea una base declarada sigue en el manifiesto y, como el tar no lo
+# trae, el restore lo da por perdido. Nada desaparece en silencio.
+live_db_paths() { for db in "${DBS[@]}"; do printf '%s\n%s-wal\n%s-shm\n' "$db" "$db" "$db"; done; }
+content_files() { ( cd "$1" && find "${CONTENT_DIRS[@]}" -type f ! -path '*__pycache__*' ! -name '*.pyc' 2>/dev/null \
+  | grep -vxF -f <(live_db_paths) | LC_ALL=C sort ); }
 same_set() {  # $1 etiqueta, $2 declarados (uno por linea), $3 en disco
   local faltan sobran
   faltan=$(comm -23 <(printf '%s\n' "$2" | LC_ALL=C sort -u) <(printf '%s\n' "$3" | LC_ALL=C sort -u) | sed '/^$/d')
@@ -90,9 +110,18 @@ same_set() {  # $1 etiqueta, $2 declarados (uno por linea), $3 en disco
     decl_ok=false
   fi
 }
+# En el shell PRINCIPAL (no en $(...)): si no, el decl_ok=false se perderia en
+# un subshell y la lista ausente pasaria como vacia, en silencio.
+need_decl() {  # $1 nombre de la lista: falla si NO esta definida (vacia si vale)
+  declare -p "$1" >/dev/null 2>&1 && return 0
+  echo "   ✗ ABORT: $DECL_FILE no define $1"; decl_ok=false; return 1
+}
+lines_of() { local -n arr="$1"; printf '%s\n' "${arr[@]}"; }
+files_in() { ( cd "$HERMES_HOME" 2>/dev/null && find "$1" -type f ! -path '*__pycache__*' ! -name '*.pyc' 2>/dev/null \
+  | grep -vxF -f <(live_db_paths) | sed "s|^$1/||" ); }
 flat() { echo "$1" | tr '/' '_'; }
 
-mkdir -p "$DBDIR" || exit 1; chmod 700 "$DEST"
+mkdir -p "$DBDIR" "$HOSTDIR" || exit 1; chmod 700 "$DEST"
 
 step "1. SQLite .backup (copia consistente en caliente)"
 db_ok=true
@@ -116,47 +145,177 @@ for db in "${DBS[@]}"; do
   printf '   %-28s %s\n' "$db" "$r"; [ "$r" = "ok" ] || db_ok=false
 done
 # Invariante: el número de bases capturadas debe igualar al esperado.
-# Si mañana aparece una séptima, este script debe FALLAR RUIDOSAMENTE en vez
-# de dejarla fuera en silencio. anchors/data/phone.db apareció así.
 expected_databases=${#DBS[@]}
 consistent_backups=$(find "$DBDIR" -type f -name '*.db' | wc -l)
 echo "   expected_databases=$expected_databases  consistent_backups=$consistent_backups"
 if [ "$consistent_backups" -ne "$expected_databases" ]; then
   echo "   ✗ ABORT: faltan copias consistentes"; db_ok=false
 fi
-# detectar bases NO declaradas en DBS
-undeclared=$(find "$HERMES_HOME" -name '*.db' \
-  -not -path "$HERMES_HOME/backups/*" -not -path "$HERMES_HOME/rescue/*" \
-  -not -path "$HERMES_HOME/hermes-agent/*" -not -path "$HERMES_HOME/hermes-oficial-clean/*" \
-  -not -path "$HERMES_HOME/cache/*" 2>/dev/null | wc -l)
-if [ "$undeclared" -ne "$expected_databases" ]; then
-  echo "   ✗ ABORT: $undeclared bases en disco vs $expected_databases declaradas"
-  find "$HERMES_HOME" -name '*.db' -not -path "$HERMES_HOME/backups/*" \
-    -not -path "$HERMES_HOME/rescue/*" -not -path "$HERMES_HOME/hermes-agent/*" \
-    -not -path "$HERMES_HOME/hermes-oficial-clean/*" -not -path "$HERMES_HOME/cache/*" 2>/dev/null \
-    | sed "s|$HERMES_HOME/|      |"
-  db_ok=false
-fi
+# Inventario SQLite POR CONTENIDO (cabecera "SQLite format 3"), no por nombre,
+# y sobre exactamente lo que el tar cubre. Una base se llame como se llame
+# (x.sqlite, state.db.bak-3504...) debe estar declarada: viva en DBS o
+# archivada en DECL_SQLITE_COLD. Si no, ABORT: nunca falta ni viaja en
+# caliente sin aviso.
+cold_list=""
+if need_decl DECL_SQLITE_COLD; then cold_list="$(lines_of DECL_SQLITE_COLD)"; else db_ok=false; fi
+inv=$(python3 - "$HERMES_HOME" "${EXCLUDE_TOP[*]}" "${EXCLUDE_SUB[*]}" "${DBS[*]}" "$cold_list" <<'PY'
+import os, sys, sqlite3
+home, top, sub, live, cold = sys.argv[1], set(sys.argv[2].split()), set(sys.argv[3].split()), set(sys.argv[4].split()), set(sys.argv[5].split())
+bad = 0
+found = []
+for root, dirs, files in os.walk(home):
+    rel = os.path.relpath(root, home)
+    keep = []
+    for d in dirs:
+        r = d if rel == "." else f"{rel}/{d}"
+        if (rel == "." and d in top) or r in sub or d == "__pycache__":
+            continue
+        keep.append(d)
+    dirs[:] = keep
+    for f in files:
+        p = os.path.join(root, f)
+        r = os.path.relpath(p, home)
+        try:
+            if os.path.islink(p) or os.path.getsize(p) < 100:
+                continue
+            with open(p, "rb") as fh:
+                if fh.read(16) != b"SQLite format 3\x00":
+                    continue
+        except OSError:
+            continue
+        found.append(r)
+for r in sorted(found):
+    if r in live:
+        continue
+    if r in cold:
+        wal = os.path.join(home, r + "-wal")
+        # Un -wal VACIO (o un -shm) lo deja cualquier apertura de lectura de una
+        # base en modo WAL; no prueba un escritor. Uno con contenido o un
+        # -journal, si: entonces no es una base archivada.
+        if (os.path.exists(wal) and os.path.getsize(wal) > 0) or os.path.exists(os.path.join(home, r + "-journal")):
+            print(f"   ✗ ABORT: {r} esta declarada ARCHIVADA pero tiene WAL con datos o journal: es una base viva"); bad = 1
+            continue
+        try:
+            # immutable=1: no bloquea ni crea -wal/-shm junto a una base archivada
+            c = sqlite3.connect(f"file:{os.path.join(home, r)}?mode=ro&immutable=1", uri=True)
+            ic = c.execute("PRAGMA integrity_check").fetchone()[0]; c.close()
+        except sqlite3.Error as e:
+            ic = str(e)
+        print(f"   {'✓' if ic == 'ok' else '✗'} archivada {r}: integrity={ic}")
+        bad |= ic != "ok"
+        continue
+    print(f"   ✗ ABORT: base SQLite NO declarada: {r}"); bad = 1
+for c in sorted(cold - set(found)):
+    print(f"   ✗ ABORT: declarada archivada pero no existe: {c}"); bad = 1
+print(f"   inventario SQLite: {len(found)} bases ({len(set(found) & live)} vivas, {len(set(found) & cold)} archivadas)")
+sys.exit(bad)
+PY
+)
+inv_rc=$?
+echo "$inv"
+[ "$inv_rc" -eq 0 ] || db_ok=false
 $db_ok && ok_db=true
 
-step "2b. Declaraciones por nombre (plugins, scripts)"
-[ -f "$DECL_FILE" ] || { echo "   ✗ ABORT: falta $DECL_FILE (DECL_PLUGINS, DECL_SCRIPTS)"; decl_ok=false; }
-same_set "plugins" "$(printf '%s\n' "${DECL_PLUGINS[@]}")" \
+step "2b. Declaraciones por nombre (plugins, scripts, patches, anchors, voice-samples)"
+[ -f "$DECL_FILE" ] || { echo "   ✗ ABORT: falta $DECL_FILE"; decl_ok=false; }
+need_decl DECL_PLUGINS && same_set "plugins" "$(lines_of DECL_PLUGINS)" \
   "$(cd "$HERMES_HOME/plugins" 2>/dev/null && find . -name plugin.yaml ! -path '*__pycache__*' | sed 's|^\./||; s|/plugin.yaml$||')"
-same_set "scripts" "$(printf '%s\n' "${DECL_SCRIPTS[@]}")" \
-  "$(cd "$HERMES_HOME/scripts" 2>/dev/null && find . -type f ! -path '*__pycache__*' ! -name '*.pyc' | sed 's|^\./||')"
+need_decl DECL_SCRIPTS && same_set "scripts" "$(lines_of DECL_SCRIPTS)" "$(files_in scripts)"
+need_decl DECL_PATCHES && same_set "patches" "$(lines_of DECL_PATCHES)" "$(files_in patches)"
+need_decl DECL_ANCHORS && same_set "anchors" "$(lines_of DECL_ANCHORS)" "$(files_in anchors)"
+need_decl DECL_VOICE && same_set "voice-samples" "$(lines_of DECL_VOICE)" "$(files_in voice-samples)"
 # Manifiesto del contenido, tomado del VIVO justo antes de empaquetar.
 content_files "$HERMES_HOME" | ( cd "$HERMES_HOME" && tr '\n' '\0' | xargs -0 -r sha256sum ) > "$DEST/content-manifest.sha256"
 echo "   content-manifest: $(wc -l < "$DEST/content-manifest.sha256") ficheros de ${CONTENT_DIRS[*]}"
 
+step "2c. Estado del host (lo que vive fuera de HERMES_HOME)"
+# Sin esto un backup restaura los datos pero no el Hermes que los usa: los
+# commits propios (Capa 2) solo existen en este disco; el gateway arranca
+# gracias a un drop-in; el wheel de hermes_hro no esta en ningun git.
+host_ok=true
+hfail() { echo "   ✗ $*"; host_ok=false; }
+mkdir -p "$HOSTDIR/systemd" "$HOSTDIR/wheels"
+if [ -f "$SYSTEMD_USER_DIR/$GATEWAY_UNIT" ]; then
+  ( cd "$SYSTEMD_USER_DIR" && find . -maxdepth 2 \( -name 'hermes-*.service' -o -name 'hermes-*.timer' -o -name 'hermes-*.path' \
+      -o -path "./$GATEWAY_UNIT.d/*.conf" \) -print0 | xargs -0 -r cp --parents -t "$HOSTDIR/systemd" )
+  echo "   ✓ units: $(cd "$HOSTDIR/systemd" && find . -type f | sed 's|^\./||' | LC_ALL=C sort | tr '\n' ' ')"
+else
+  hfail "no existe la unit $SYSTEMD_USER_DIR/$GATEWAY_UNIT"
+fi
+crontab -l > "$HOSTDIR/crontab.txt" 2>/dev/null || echo "# sin crontab para $(id -un)" > "$HOSTDIR/crontab.txt"
+if git -C "$PROD_REPO" rev-parse HEAD >/dev/null 2>&1; then
+  g() { git -C "$PROD_REPO" "$@"; }
+  head=$(g rev-parse HEAD); branch=$(g rev-parse --abbrev-ref HEAD); up=$(g rev-parse -q --verify refs/remotes/origin/main || true)
+  { echo "repo $PROD_REPO"; echo "HEAD $head"; echo "branch $branch"; echo "origin/main $up"; } > "$HOSTDIR/prod-refs.txt"
+  g status --porcelain > "$HOSTDIR/prod-status.txt"
+  ncar=$(g rev-list --count --no-merges HEAD ${up:+^$up})
+  if [ -z "$up" ]; then
+    hfail "sin refs/remotes/origin/main: no se puede acotar el bundle de commits propios"
+  elif [ "$ncar" -eq 0 ]; then
+    echo "   ✓ commits propios: 0 (nada que empaquetar)"
+  elif g bundle create "$HOSTDIR/carried.bundle" "$up..HEAD" >/dev/null 2>&1 \
+       && g bundle verify "$HOSTDIR/carried.bundle" >/dev/null 2>&1; then
+    echo "   ✓ commits propios: $ncar en carried.bundle (git bundle verify ok; prerrequisito upstream ${up:0:10})"
+  else
+    hfail "no se pudo crear/verificar el bundle de los $ncar commits propios"
+  fi
+  [ -s "$HOSTDIR/prod-status.txt" ] && echo "   ! produccion tiene cambios sin commit (listados en host/prod-status.txt)"
+  py="$PROD_PYTHON"
+  if [ -x "$py" ] && "$py" -m pip freeze --all > "$HOSTDIR/venv-freeze.txt" 2>/dev/null && [ -s "$HOSTDIR/venv-freeze.txt" ]; then
+    echo "   ✓ pip freeze del venv: $(wc -l < "$HOSTDIR/venv-freeze.txt") paquetes"
+    # paquetes instalados desde un fichero local (p. ej. el wheel de hermes_hro):
+    # sin copia, no se pueden reinstalar.
+    "$py" - "$HOSTDIR/wheels" <<'PY' || host_ok=false
+import hashlib, json, shutil, sys
+from importlib import metadata
+from pathlib import Path
+out = Path(sys.argv[1]); bad = 0
+for dist in metadata.distributions():
+    raw = dist.read_text("direct_url.json")
+    if not raw:
+        continue
+    d = json.loads(raw)
+    url = d.get("url", "")
+    if "archive_info" not in d or not url.startswith("file://"):
+        continue
+    src = Path(url[7:]); want = (d["archive_info"].get("hashes") or {}).get("sha256")
+    name = dist.metadata["Name"]
+    if not src.is_file():
+        print(f"   ✗ {name}: instalado desde {src}, que ya no existe"); bad = 1; continue
+    have = hashlib.sha256(src.read_bytes()).hexdigest()
+    if want and have != want:
+        print(f"   ✗ {name}: {src.name} no es el instalado (sha256 distinto)"); bad = 1; continue
+    shutil.copy2(src, out / src.name)
+    print(f"   ✓ wheel local {src.name} copiado (sha256 = el instalado)")
+sys.exit(bad)
+PY
+  else
+    hfail "sin pip freeze del venv productivo ($py)"
+  fi
+else
+  hfail "no hay checkout productivo en $PROD_REPO"
+fi
+{ for r in $EXTRA_REPOS; do
+    [ -d "$r/.git" ] || continue
+    echo "== $r"; git -C "$r" status -sb | head -1; git -C "$r" rev-parse HEAD
+    git -C "$r" for-each-ref --format='%(refname:short) %(objectname:short) %(upstream:short) %(upstream:track)' refs/heads
+  done; } > "$HOSTDIR/repos.txt" 2>/dev/null
+{ for b in "$HOME/.local/bin/hermes" "$HOME/.local/bin/hermes-maint" /usr/local/libexec/hermes-priv-helper; do
+    [ -e "$b" ] || { echo "ausente $b"; continue; }
+    echo "$(sha256sum "$b" | cut -c1-64) $(stat -c '%U:%G %a' "$b") $b -> $(readlink -f "$b")"
+  done
+  # Solo metadatos: el secreto TOTP y sudoers son de root y NO se copian.
+  for f in /etc/sudoers.d/hermes-priv /etc/hermes-priv/totp.key; do
+    stat -c '%U:%G %a %n' "$f" 2>/dev/null || echo "no visible para $(id -un): $f"
+  done; } > "$HOSTDIR/launchers.txt"
+[ -f "$HOME/.local/bin/hermes" ] && cp "$HOME/.local/bin/hermes" "$HOSTDIR/local-bin-hermes"
+$host_ok && ok_host=true
+
 step "3+4. Empaquetar (excluye regenerables y las DB en caliente)"
-tar -czf "$ARCHIVE" -C "$(dirname "$HERMES_HOME")" \
-  --exclude="$BASE/backups" --exclude="$BASE/rescue" \
-  --exclude="$BASE/hermes-oficial-clean" \
-  --exclude="$BASE/hermes-agent/venv" --exclude="$BASE/hermes-agent/.git" \
-  --exclude="$BASE/hermes-agent/node_modules" \
-  --exclude="$BASE/node" --exclude="$BASE/lsp" \
-  --exclude="$BASE/cache" --exclude="$BASE/audio_cache" \
+excl=()
+for d in "${EXCLUDE_TOP[@]}"; do excl+=(--exclude="$BASE/$d"); done
+for d in "${EXCLUDE_SUB[@]}"; do excl+=(--exclude="$BASE/$d"); done
+tar -czf "$ARCHIVE" -C "$(dirname "$HERMES_HOME")" "${excl[@]}" \
   --exclude='__pycache__' --exclude='*.pyc' \
   --exclude='*.db' --exclude='*.db-wal' --exclude='*.db-shm' \
   "$BASE" 2>"$DEST/tar-warnings.log"
@@ -195,11 +354,11 @@ while read -r perm f; do
   else printf '   ✗ %-26s AUSENTE\n' "$f"; restore_ok=false; fi
 done < "$DEST/perms-esperados.txt"
 
-# plugins/ y scripts/: el restaurado debe ser EXACTAMENTE el manifiesto.
+# contenido declarado: el restaurado debe ser EXACTAMENTE el manifiesto.
 if ( cd "$H" && sha256sum -c --quiet "$DEST/content-manifest.sha256" ) >/dev/null 2>&1; then
   sobran=$(comm -13 <(cut -c67- "$DEST/content-manifest.sha256" | LC_ALL=C sort) <(content_files "$H"))
   if [ -z "$sobran" ]; then
-    printf '   ✓ %-26s %s ficheros, sha256 identico\n' "${CONTENT_DIRS[*]}" "$(wc -l < "$DEST/content-manifest.sha256")"
+    printf '   ✓ %-26s %s ficheros, sha256 identico\n' "contenido declarado" "$(wc -l < "$DEST/content-manifest.sha256")"
   else
     echo "   ✗ restaurado trae ficheros fuera del manifiesto:"; printf '      %s\n' $sobran; restore_ok=false
   fi
@@ -210,10 +369,13 @@ else
 fi
 $decl_ok || { echo "   ✗ declaraciones por nombre fallidas (paso 2b)"; restore_ok=false; }
 
-for d in "${!EXPECT[@]}"; do
-  n=$(find "$H/$d" -type f ! -path '*__pycache__*' ! -name '*.pyc' 2>/dev/null | wc -l); e=${EXPECT[$d]}
-  [ "$n" -eq "$e" ] && printf '   ✓ %-26s %s/%s\n' "$d/" "$n" "$e" \
-                    || { printf '   ✗ %-26s %s/%s\n' "$d/" "$n" "$e"; restore_ok=false; }
+# bases archivadas: viajan en el tar; la copia restaurada tambien debe abrir
+for c in $cold_list; do
+  if [ -f "$H/$c" ]; then
+    r=$(python3 -c "import sqlite3,sys;print(sqlite3.connect(sys.argv[1]).execute('PRAGMA integrity_check').fetchone()[0])" "$H/$c" 2>&1)
+    [ "$r" = "ok" ] && printf '   ✓ %-26s archivada, integrity=ok\n' "$c" \
+                    || { printf '   ✗ %-26s archivada, integrity=%s\n' "$c" "$r"; restore_ok=false; }
+  else printf '   ✗ %-26s archivada AUSENTE del archivo\n' "$c"; restore_ok=false; fi
 done
 
 # las DB se validan desde db-consistent/, la fuente autoritativa
@@ -229,35 +391,29 @@ done
 $restore_ok && ok_restore=true
 
 step "10. Estado (derivado, nunca fijado a mano)"
-cat > "$DEST/RESTORE.md" <<EOF
-# Restaurar este backup
-
-    tar -xzf $(basename "$ARCHIVE") -C /destino
-    # El tar trae las entradas de directorio, pero esto no cuesta nada y cubre
-    # un destino donde cron/ o anchors/data/ no se hayan materializado:
-    mkdir -p /destino/$BASE/cron /destino/$BASE/anchors/data /destino/$BASE/costs /destino/$BASE/hermes-control
-    # las DB NO están en el tar; copiarlas desde db-consistent/ (10):
-    cp db-consistent/state.db                  /destino/$BASE/state.db
-    cp db-consistent/verification_evidence.db  /destino/$BASE/verification_evidence.db
-    cp db-consistent/kanban.db                 /destino/$BASE/kanban.db
-    cp db-consistent/shared-state.db           /destino/$BASE/shared-state.db
-    cp db-consistent/cron_executions.db        /destino/$BASE/cron/executions.db
-    cp db-consistent/cron_deliveries.db        /destino/$BASE/cron/deliveries.db
-    cp db-consistent/cron_notepad.db           /destino/$BASE/cron/notepad.db
-    cp db-consistent/anchors_data_phone.db     /destino/$BASE/anchors/data/phone.db
-    cp db-consistent/costs_prices.db           /destino/$BASE/costs/prices.db
-    cp db-consistent/hermes-control_gifs.db    /destino/$BASE/hermes-control/gifs.db
-
-Verificar antes: sha256sum -c MANIFEST.sha256
-EOF
-python3 - "$STATE" "$ok_created" "$ok_archive" "$ok_db" "$ok_manifest" "$ok_restore" "$ARCHIVE" <<'PY'
+{ echo "# Restaurar este backup"
+  echo
+  echo "    tar -xzf $(basename "$ARCHIVE") -C /destino"
+  echo "    # las DB NO están en el tar; copiarlas desde db-consistent/ (${#DBS[@]}):"
+  for db in "${DBS[@]}"; do
+    echo "    mkdir -p \"/destino/$BASE/$(dirname "$db")\" && cp db-consistent/$(flat "$db") /destino/$BASE/$db"
+  done
+  echo
+  echo "Código y servicio (host/): carried.bundle (commits propios; prerrequisito"
+  echo "upstream en prod-refs.txt), venv-freeze.txt + wheels/, systemd/ (incluido"
+  echo "el drop-in del gateway), crontab.txt, launchers.txt (solo metadatos de root:"
+  echo "el TOTP y sudoers NO están aquí; se reprovisionan)."
+  echo
+  echo "Verificar antes: sha256sum -c MANIFEST.sha256"; } > "$DEST/RESTORE.md"
+python3 - "$STATE" "$ok_created" "$ok_archive" "$ok_db" "$ok_manifest" "$ok_restore" "$ok_host" "$ARCHIVE" <<'PY'
 import json, sys, os, datetime
 p, *f, arch = sys.argv[1:]
-c, a, d, m, r = [x == "true" for x in f]
+c, a, d, m, r, h = [x == "true" for x in f]
 st = {"timestamp": datetime.datetime.now().astimezone().isoformat(),
       "archive": arch, "size_bytes": os.path.getsize(arch) if os.path.exists(arch) else 0,
+      # hermes-maint lee los cinco primeros; host_state entra en backup_verified.
       "backup": {"created": c, "archive_integrity": a, "database_integrity": d,
-                 "manifest_integrity": m, "restore_verified": r}}
+                 "manifest_integrity": m, "restore_verified": r, "host_state": h}}
 st["backup_verified"] = all(st["backup"].values())   # derivado de TODOS == true
 json.dump(st, open(p, "w"), indent=2)
 print(json.dumps(st["backup"], indent=2)); print("backup_verified:", st["backup_verified"])
