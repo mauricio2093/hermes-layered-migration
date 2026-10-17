@@ -13,12 +13,14 @@ estado. No cambia la semántica ni los códigos de salida de `hermes-maint`.
 ```
 diario (timer 04:15, o `hermes-updater run --trigger manual`)
   PREFLIGHT            disco, memoria, gateway, última observación de hermes-maint
+  DAILY_BACKUP         SIEMPRE, antes de mirar versiones: no depende de la red,
+                       de que haya novedades ni de que la detección no falle
   VERSION_DISCOVERY    Hermes (git, sin fetch en producción) + Claude/Codex/OpenCode
   UPDATE_CLASSIFICATION
-   ├─ NO_UPDATES → DAILY_BACKUP → NOTIFY_CURRENT_VERSIONS → COMPLETE
+   ├─ NO_UPDATES → NOTIFY_CURRENT_VERSIONS → COMPLETE
    └─ UPDATES_AVAILABLE → NOTIFY_AVAILABLE
         → AUX_UPDATES          (cada CLI por separado; nunca arrastra a Hermes)
-        → BACKUP               (pre-update: A fresco + ZIP oficial B + código + servicio)
+        → BACKUP               (pre-update: el A de ESTA ejecución + ZIP oficial B + código + servicio)
         → BACKUP_VERIFICATION  (verificador independiente + restauración aislada)
         → STAGING_PREPARATION  (clon --shared, merge del tag estable, venv copiado)
         → COMPATIBILITY_TESTS  (suites + smoke con la Capa 3 RESTAURADA)
@@ -183,10 +185,9 @@ install -d ~/.local/lib/hermes-updater
 cp -r ~/repos/hermes-layered-migration/updater/{bin,hermes_updater} ~/.local/lib/hermes-updater/
 ln -sf ~/.local/lib/hermes-updater/bin/hermes-updater ~/.local/bin/hermes-updater
 
-# 2) declaraciones pendientes (Capa 3) y script de backup actualizado
-#    - añadir orca-status a DECL_PLUGINS y lang-guard.py a DECL_SCRIPTS en
-#      ~/.hermes/backup-declarations.sh (después de revisarlos)
-#    - anchors: 30 ficheros, el script espera 27 -> revisar y actualizar EXPECT
+# 2) declaraciones (Capa 3) y script de backup: JUNTOS, ver docs/backup-decl-007.md
+cp ~/.hermes/backup-declarations.sh ~/.hermes/backup-declarations.sh.bak-$(date +%Y%m%d)
+cp <propuesta revisada> ~/.hermes/backup-declarations.sh
 cp ~/repos/hermes-layered-migration/scripts/backup-hermes-home.sh ~/.hermes/scripts/
 
 # 3) prueba manual sin esperar al timer (no toca producción)
