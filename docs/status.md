@@ -8,6 +8,8 @@ hermesd resident        NO         and not planned; see below
 systemd timer           ACTIVE     daily, 03:00 (+0–300s), user unit
 tasks                   disk-space · backup-freshness · gateway-service-health
 auto-remediation        NO         every task observes and reports, nothing acts
+update orchestrator     BUILT      hermes-updater: implemented and tested in
+                                   isolation, NOT deployed -- see updater.md
 Onion integrated        NO         zero Rust touches the router
 Layer 2 in production   YES        deployed 2026-09-18 19:04; stable at 24h,
                                    functionally unproven -- see layer2-observation.md
@@ -39,9 +41,13 @@ of that is a separate decision that has not been taken.
 
 This project began with *"un sistema completo autoactualizado… cronjobs de las
 12 am… backup en caso de falla"*. What exists at 03:00 is three observations.
-**The update orchestrator does not exist**, and nothing automatic runs a
-backup. That was deliberate — observe before acting — but the gap is real and
-should not be mistaken for an oversight.
+Until 2026-10-16 **the update orchestrator did not exist**, and nothing
+automatic ran a backup. It now exists as a separate piece, `hermes-updater`
+([updater.md](updater.md)): daily backup with independent verification,
+version discovery, isolated candidate preparation, local CI, a bounded AI
+auditor, and a TOTP-attested approval before any production change. It is
+**not deployed yet**: no timer is active and production is unchanged.
+`hermes-maint` keeps its role and its exit codes.
 
 ## `hermesd` is not being built
 
