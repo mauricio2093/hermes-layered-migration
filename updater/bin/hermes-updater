@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Lanzador: python del SISTEMA en modo aislado (-I: sin PYTHON*, sin site del
+# usuario, sin el directorio actual en sys.path). Nunca el venv de Hermes: es
+# justo lo que puede cambiar durante una actualizacion.
+set -euo pipefail
+HERE="$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)"
+exec /usr/bin/python3 -I -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from hermes_updater.cli import main; sys.exit(main(sys.argv[1:]))' "$HERE" "$@"
