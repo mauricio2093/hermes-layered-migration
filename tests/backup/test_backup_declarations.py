@@ -98,10 +98,23 @@ def world(tmp_path):
     return h, prod, units
 
 
+def fake_prod_python(dirpath) -> str:
+    """Python "de produccion" para el script: ``pip freeze`` con una lista fija
+    y el resto delegado en el interprete de los tests. Asi no depende de que el
+    Python que ejecuta pytest traiga pip (el del sistema no lo trae)."""
+    p = pathlib.Path(dirpath) / "prod-python"
+    p.write_text("#!/bin/sh\n"
+                 'if [ "$1" = "-m" ] && [ "$2" = "pip" ] && [ "$3" = "freeze" ]; then\n'
+                 "  printf 'requests==2.31.0\\npython-telegram-bot==22.0\\n'; exit 0\nfi\n"
+                 f'exec "{sys.executable}" "$@"\n')
+    p.chmod(0o755)
+    return str(p)
+
+
 def backup(h, prod, units, **env):
     e = {"HERMES_HOME": str(h), "PATH": "/usr/bin:/bin", "HOME": str(h.parent),
          "HERMES_PROD_REPO": str(prod), "HERMES_SYSTEMD_USER_DIR": str(units),
-         "HERMES_PROD_PYTHON": sys.executable, "HERMES_EXTRA_REPOS": str(prod), **GIT_ENV, **env}
+         "HERMES_PROD_PYTHON": fake_prod_python(h.parent), "HERMES_EXTRA_REPOS": str(prod), **GIT_ENV, **env}
     r = subprocess.run(["bash", str(SCRIPT)], env=e, capture_output=True, text=True, timeout=300)
     dest = sorted((h / "backups" / "independiente").iterdir())[-1]
     state = json.loads((dest / "state.json").read_text())

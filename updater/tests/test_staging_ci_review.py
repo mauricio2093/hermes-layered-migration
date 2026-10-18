@@ -104,7 +104,41 @@ def test_venv_del_candidato_y_lock(world):
 def test_extras_inferidos():
     pp = '[project]\nname="hermes-agent"\n[project.optional-dependencies]\n' \
          'a=["x-y==1"]\nb=["z>=2"]\nall=["hermes-agent[a,b]"]\n'
-    assert staging.installed_extras(pp, {"x-y"}) == ["a"]
+    assert staging.installed_extras(pp, {"x-y": "1.0"}) == ["a"]
+
+
+def test_un_paquete_compartido_no_arrastra_el_extra():
+    # 2026-10-18: con "basta uno", aiohttp arrastraba dingtalk/teams/matrix y el
+    # candidato instalaba ~50 paquetes que produccion nunca tuvo.
+    pp = '[project]\nname="hermes-agent"\n[project.optional-dependencies]\n' \
+         'messaging=["aiohttp>=3"]\nmatrix=["aiohttp>=3","mautrix==0.21"]\n'
+    assert staging.installed_extras(pp, {"aiohttp": "3.9"}) == ["messaging"]
+
+
+def test_pin_incumplido_no_cuenta():
+    # [web] fija fastapi==0.133.1; produccion tiene 0.141.1 por la dependencia
+    # base: [web] nunca se instalo y no debe bajar fastapi en el candidato.
+    pp = '[project]\nname="hermes-agent"\n[project.optional-dependencies]\n' \
+         'web=["fastapi==0.133.1","uvicorn==0.41.0"]\n'
+    assert staging.installed_extras(pp, {"fastapi": "0.141.1", "uvicorn": "0.53.0"}) == []
+    assert staging.installed_extras(pp, {"fastapi": "0.133.1", "uvicorn": "0.41.0"}) == ["web"]
+
+
+def test_marcadores_del_python_del_venv():
+    pp = '[project]\nname="hermes-agent"\n[project.optional-dependencies]\n' \
+         'u=["uvloop>=0.19; sys_platform != \'win32\'", "winloop; sys_platform == \'win32\'"]\n'
+    linux = {"sys_platform": "linux", "python_version": "3.11", "python_full_version": "3.11.15",
+             "os_name": "posix", "platform_machine": "x86_64", "platform_python_implementation": "CPython",
+             "implementation_name": "cpython", "platform_system": "Linux", "platform_release": "",
+             "platform_version": "", "implementation_version": "3.11.15"}
+    assert staging.installed_extras(pp, {"uvloop": "0.21"}, linux) == ["u"]
+    assert staging.installed_extras(pp, {}, linux) == []
+
+
+def test_instalacion_directa_sin_version_solo_cumple_sin_pin():
+    pp = '[project]\nname="hermes-agent"\n[project.optional-dependencies]\n' \
+         'a=["foo"]\nb=["foo==1"]\n'
+    assert staging.installed_extras(pp, {"foo": None}) == ["a"]
 
 
 # --- canalizacion de pruebas con pytest REAL -------------------------------------------

@@ -156,6 +156,9 @@ class ScriptedRunner(Runner):
         bad = lambda out="", code=1: Result(tuple(argv), code, out, 0.01)
         if argv[0] == "crontab":
             return bad("no crontab for t")
+        if "default_environment" in joined:
+            from packaging.markers import default_environment
+            return ok(json.dumps(default_environment()))
         if "-m pip" in joined:
             if " freeze" in joined:
                 return ok("requests==2.31.0\npython-telegram-bot==22.0\n")
@@ -198,7 +201,15 @@ def world(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_UPDATER_NO_SCOPE", "1")
     # el script de backup registra el estado del host: en los tests, el del
     # mundo aislado (python con pip, repos y HOME del fixture), nunca el real
-    monkeypatch.setenv("HERMES_PROD_PYTHON", sys.executable)
+    shim = tmp_path / "prod-python"
+    shim.write_text("#!/bin/sh\n"
+                    'if [ "$1" = "-m" ] && [ "$2" = "pip" ] && [ "$3" = "freeze" ]; then\n'
+                    "  printf 'requests==2.31.0\\npython-telegram-bot==22.0\\n'; exit 0\nfi\n"
+                    f'exec "{sys.executable}" "$@"\n')
+    shim.chmod(0o755)
+    # pip freeze fijo, el resto delegado: no depende de que el Python de pytest
+    # traiga pip (el del sistema no lo trae).
+    monkeypatch.setenv("HERMES_PROD_PYTHON", str(shim))
     monkeypatch.setenv("HERMES_EXTRA_REPOS", str(tmp_path / "prod"))
     monkeypatch.setenv("HOME", str(tmp_path / "home"))
     for k, v in ID.items():

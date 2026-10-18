@@ -69,29 +69,77 @@ class Git:
         return r.out.strip() if r.ok else ""
 
 
-_DEP_NAME = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)")
 
 
 def _norm(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
-def installed_extras(pyproject_text: str, installed: set) -> list[str]:
-    """Extras ya elegidos en el venv productivo: los que tienen al menos un
-    paquete propio instalado. Los meta-extras (``hermes-agent[...]``) no."""
+def installed_extras(pyproject_text: str, installed: dict, env: Optional[dict] = None) -> list[str]:
+    """Extras ya elegidos en el venv productivo, leidos del pyproject de
+    PRODUCCION: los que tienen TODOS sus requisitos aplicables cumplidos por lo
+    instalado (``installed``: nombre normalizado -> version, o None si es una
+    instalacion directa). Los meta-extras (``hermes-agent[...]``) no cuentan.
+
+    Antes bastaba con UN paquete en comun: ``aiohttp`` o ``httpx`` arrastraban
+    dingtalk, teams, matrix... y el candidato instalaba ~50 paquetes que
+    produccion nunca tuvo, ademas de bajar ``fastapi`` al pin de ``[web]``,
+    un extra que produccion no tenia. ``env`` son los marcadores del Python
+    del venv (no los del Python que ejecuta el actualizador)."""
+    from packaging.requirements import InvalidRequirement, Requirement
+
     data = tomllib.loads(pyproject_text)
     project = data.get("project", {})
     me = _norm(project.get("name", "hermes-agent"))
     out = []
     for extra, reqs in (project.get("optional-dependencies") or {}).items():
-        names = []
+        own, ok = 0, True
         for r in reqs:
-            m = _DEP_NAME.match(r)
-            if m and _norm(m.group(1)) != me:
-                names.append(_norm(m.group(1)))
-        if names and any(n in installed for n in names):
+            try:
+                req = Requirement(r)
+            except InvalidRequirement:
+                ok = False
+                break
+            if _norm(req.name) == me:
+                continue
+            if req.marker is not None and not req.marker.evaluate({**(env or {}), "extra": extra}):
+                continue
+            own += 1
+            name = _norm(req.name)
+            if name not in installed:
+                ok = False
+                break
+            ver = installed[name]
+            if req.specifier and (ver is None or not req.specifier.contains(ver, prereleases=True)):
+                ok = False
+                break
+        if own and ok:
             out.append(extra)
     return sorted(out)
+
+
+def _installed_versions(freeze: str) -> dict:
+    out = {}
+    for line in freeze.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if "==" in line:
+            name, ver = line.split("==", 1)
+            out[_norm(name)] = ver.strip()
+        else:
+            out[_norm(line.split(" @ ")[0].strip())] = None
+    return out
+
+
+_MARKER_ENV_PROBE = (
+    "import json\n"
+    "try:\n"
+    "    from packaging.markers import default_environment\n"
+    "except ImportError:\n"
+    "    from pip._vendor.packaging.markers import default_environment\n"
+    "print(json.dumps(default_environment()))\n"
+)
 
 
 def _deps(pyproject_text: str) -> dict:
@@ -270,9 +318,24 @@ def build_staging_venv(cfg: Config, runner: Runner, cand: Candidate) -> tuple[bo
     cand.venv = str(venv)
     py = str(venv / "bin" / "python")
     fr = runner.run([py, "-m", "pip", "freeze", "--all"], timeout=300, keep=None)
-    installed = {_norm(l.split("==")[0].split(" @ ")[0]) for l in fr.out.splitlines() if l and not l.startswith("#")}
-    extras = installed_extras((Path(cand.repo) / "pyproject.toml").read_text(), installed)
+    if not fr.ok:
+        return False, "pip freeze del venv copiado fallido: " + fr.tail(300)
+    menv = runner.run([py, "-I", "-c", _MARKER_ENV_PROBE], timeout=120)
+    try:
+        env = json.loads(menv.out) if menv.ok else None
+    except ValueError:
+        env = None
+    if not isinstance(env, dict):
+        return False, "no se pudieron leer los marcadores del Python del venv: " + menv.tail(300)
+    # Los extras se deciden con el pyproject de PRODUCCION (lo que de verdad se
+    # instalo) y se instalan los que siguen existiendo en el candidato.
+    prod_extras = installed_extras((cfg.prod_repo / "pyproject.toml").read_text(),
+                                   _installed_versions(fr.out), env)
+    target = tomllib.loads((Path(cand.repo) / "pyproject.toml").read_text())
+    target_extras = set((target.get("project", {}).get("optional-dependencies") or {}))
+    extras = [e for e in prod_extras if e in target_extras]
     cand.deps["extras"] = extras
+    cand.deps["extras_gone_in_target"] = [e for e in prod_extras if e not in target_extras]
     spec = f"{cand.repo}[{','.join(extras)}]" if extras else cand.repo
     ins = runner.run([py, "-m", "pip", "install", "--disable-pip-version-check", "-q", "-e", spec],
                      timeout=cfg.policy.test_timeout_s, env={"PIP_NO_INPUT": "1"})
