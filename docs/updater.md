@@ -98,6 +98,31 @@ producción) y también falla allí. Cero tests ejecutados, timeout o
 error interno de pytest = FAIL. Todo corre en `systemd-run --scope` con
 `MemoryMax=1800M` y `nice`.
 
+- Un módulo que no se puede recoger (`NameError` al importar) ya no detiene
+  la suite: pytest corre con `--continue-on-collection-errors` y el módulo
+  cuenta como un fallo más, con el fichero como identificador. v0.22.2 trae uno
+  así (`tests/hermes_cli/test_plugins_cmd_remove_bookkeeping.py`, también roto
+  en el tag puro), y antes dejaba `upstream-core` en 0 tests ejecutados.
+- Antes de comparar con la línea base, los fallidos se repiten **una vez** en
+  el candidato. Los que pasan quedan como **inestables** (`flaky`): constan en
+  el detalle y en la evidencia del auditor IA, no como regresión. En este
+  equipo, una suite lanzada con otra en paralelo hacía fallar por tiempo los
+  `Writer.flush()` del optimizador; en frío pasan.
+- pytest corre bajo `eatmydata` si está instalado: las bases de los tests son
+  desechables, y en el disco mecánico de producción cada sentencia DDL de
+  SQLite esperaba a un fsync (~37 ms). `upstream-core` de v0.22.2 no terminaba
+  en 60 minutos (6 s de preparación por test); con `eatmydata`, el fichero
+  medido pasa de 73 s a 3 s. Solo afecta a los procesos de pytest, nunca al
+  gateway ni a los backups.
+- El venv del candidato es una copia del productivo. Tras copiarlo se borran
+  los `*-pytest-*.pyc`: son las cachés de pytest con las aserciones
+  reescritas, y al cargarlas su ruta de origen no se corrige. El venv copiado
+  seguía apuntando a `~/.hermes/hermes-oficial-clean/.venv`, la protección
+  `home_io_guard` de v0.22.2 lo detectaba y pytest moría con INTERNALERROR a
+  mitad de `upstream-core`.
+- Un INTERNALERROR de pytest es siempre FAIL ("la suite no terminó"): nunca se
+  confunde con un test que falla.
+
 ## Aprobación (integración con hermes-control)
 
 El secreto TOTP es root-only, así que la única verificación que un proceso del
@@ -167,6 +192,25 @@ comando: código de salida + versión posterior + `--version`/`--help`; si algo
 falla, se restaura y se comprueba. Las tres ya se auto-actualizan solas (hoy
 lo hicieron a las 07:02 y 18:34); el orquestador cubre los días en que no.
 
+## Resoluciones de conflicto revisadas
+
+Un merge con conflictos se aborta y el candidato queda BLOCKED, salvo que el
+conflicto sea **idéntico** a uno ya resuelto y revisado por una persona. Esas
+resoluciones viven en `~/.local/state/hermes-updater/resolutions/rr-cache`
+(formato de `git rerere`: la huella del conflicto, `preimage`, y cómo quedó,
+`postimage`). El clon las copia; nunca escribe en ellas.
+
+- Se reutilizan solo si `git rerere remaining` queda vacío y ningún fichero
+  conserva marcas de conflicto. Un conflicto distinto, o uno resuelto a medias,
+  sigue bloqueando.
+- El commit del candidato lo dice ("Conflicts resolved by reviewed recorded
+  resolutions") y el detalle también: nunca aparece como "merge limpio".
+- El auditor IA recibe la lista de ficheros y el diff combinado
+  (`git show --cc`) de lo resuelto. Las pruebas corren igual que siempre.
+
+Grabar una resolución: repetir el merge en un clon con `rerere.enabled`,
+resolver, revisar, `git commit`, y copiar su `.git/rr-cache` a ese directorio.
+
 ## Notificaciones
 
 Por `hermes send --to telegram` (CLI oficial de Hermes para scripts y cron;
@@ -189,6 +233,10 @@ ln -sf ~/.local/lib/hermes-updater/bin/hermes-updater ~/.local/bin/hermes-update
 cp ~/.hermes/backup-declarations.sh ~/.hermes/backup-declarations.sh.bak-$(date +%Y%m%d)
 cp <propuesta revisada> ~/.hermes/backup-declarations.sh
 cp ~/repos/hermes-layered-migration/scripts/backup-hermes-home.sh ~/.hermes/scripts/
+
+# 2b) resoluciones revisadas (hoy: la de v0.22.2 en telegram/adapter.py)
+install -d ~/.local/state/hermes-updater/resolutions
+cp -a ~/.local/state/hermes-updater-dev/state/resolutions/rr-cache ~/.local/state/hermes-updater/resolutions/
 
 # 3) prueba manual sin esperar al timer (no toca producción)
 hermes-updater run --trigger manual --no-aux --notify file
@@ -226,10 +274,14 @@ como éxito; 6–9 son hallazgos y se ven en rojo.
   intercambio de venv y los backups son reales. El primer despliegue real
   será la primera observación en producción.
 - La ruta real de Telegram no se ha probado enviando (requiere tu permiso).
-- Un candidato real de v0.22.2 hoy **no** se puede preparar: conflicto en
-  `plugins/platforms/telegram/adapter.py`, y upstream partió
-  `hermes_cli/plugins.py` en `plugins_*.py`, lo que afecta a `61479f3985`.
-  Necesita una adaptación manual de la Capa 2.
+- v0.22.2 choca con la Capa 2 en `plugins/platforms/telegram/adapter.py`:
+  upstream pasó dos firmas a genéricos nativos (`dict`/`list`) y el commit de
+  los botones de copiar añadió parámetros en esas mismas líneas. Se resolvió a
+  mano (genéricos nuevos y parámetros propios) y la resolución se guardó como
+  **resolución revisada** (ver abajo). Con ella, `prepare()` produce el árbol
+  revisado byte a byte. La partición de `hermes_cli/plugins.py` en
+  `plugins_*.py` no rompe `61479f3985`: usa los métodos de la clase base, que
+  siguen existiendo; lo confirman sus tests en el candidato.
 - La verificación del tag es por coincidencia con `ls-remote`; upstream no
   firma los tags (`NOT_OBSERVED`).
 - `pip install` en el despliegue descarga de PyPI; sin red, el despliegue

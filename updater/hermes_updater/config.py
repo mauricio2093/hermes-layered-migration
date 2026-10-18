@@ -102,6 +102,12 @@ class Config:
         return self.state_dir / "evidence"
 
     @property
+    def resolutions_dir(self) -> Path:
+        """``rr-cache`` de git rerere con resoluciones de conflicto REVISADAS.
+        Solo se reutilizan si el conflicto es identico al revisado."""
+        return self.state_dir / "resolutions" / "rr-cache"
+
+    @property
     def prod_python(self) -> Path:
         return self.prod_repo / ".venv" / "bin" / "python"
 

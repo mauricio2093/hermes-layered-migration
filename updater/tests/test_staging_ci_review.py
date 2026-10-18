@@ -54,6 +54,79 @@ def test_conflicto_bloquea_con_lista_exacta(world):
     assert git(world.prod, "rev-parse", "HEAD") == head and git(world.prod, "status", "--porcelain") == ""
 
 
+def _record_resolution(world, tag, resolved: dict, tmp):
+    """Hace a mano el merge que hara el actualizador, lo resuelve con ``resolved``
+    y guarda el rr-cache de rerere donde el actualizador lo busca."""
+    scratch = tmp / "resolve"
+    subprocess.run(["git", "clone", "-q", "--shared", "--branch", git(world.prod, "rev-parse", "--abbrev-ref", "HEAD"),
+                    str(world.prod), str(scratch)], check=True)
+    git(scratch, "config", "rerere.enabled", "true")
+    git(scratch, "fetch", "-q", str(world.up), f"refs/tags/{tag}:refs/tags/{tag}")
+    subprocess.run(["git", "-C", str(scratch), "merge", "--no-ff", "--no-edit", f"refs/tags/{tag}"],
+                   capture_output=True)
+    for f, text in resolved.items():
+        (scratch / f).write_text(text)
+    git(scratch, "add", *resolved)
+    git(scratch, "commit", "-q", "--no-edit")
+    import shutil
+    shutil.copytree(scratch / ".git" / "rr-cache", world.cfg.resolutions_dir, dirs_exist_ok=True)
+
+
+def _same_conflict(world):
+    commit(world.prod, {"app.py": "A = 1\nB = propio\n"}, "fix: cambio propio en app")
+    commit(world.up, {"app.py": "A = 3\nB = upstream\n"}, "upstream cambia la misma linea")
+    git(world.up, "tag", "-a", "v0.3.0", "-m", "r")
+
+
+def test_resolucion_revisada_se_reutiliza_solo_para_ese_conflicto(world, tmp_path):
+    _same_conflict(world)
+    _record_resolution(world, "v0.3.0", {"app.py": "A = 3\nB = propio\n"}, tmp_path)
+    head = git(world.prod, "rev-parse", "HEAD")
+    cand = _prepare(world, "v0.3.0")
+    assert cand.verdict == Verdict.PASS, cand.detail
+    assert cand.analysis["recorded_resolutions"] == ["app.py"]
+    assert "resoluciones revisadas en: app.py" in cand.detail and "limpio" not in cand.detail
+    assert "+B = propio" in cand.analysis["recorded_resolution_diff"].replace("++", "+")
+    ev = review.build_evidence(versions={}, backup={}, candidate=cand.to_dict(), tests=[], git_log="", home="/nadie")
+    assert ev["analysis"]["recorded_resolutions"] == ["app.py"] and ev["analysis"]["recorded_resolution_diff"]
+    repo = Path(cand.repo)
+    assert git(repo, "show", f"{cand.candidate_commit}:app.py") == "A = 3\nB = propio"
+    assert git(repo, "rev-parse", f"{cand.candidate_commit}^1") == head
+    assert "reviewed recorded resolutions" in git(repo, "log", "-1", "--format=%B", cand.candidate_commit)
+    # el rr-cache del estado no lo modifica el clon
+    assert git(world.prod, "rev-parse", "HEAD") == head and git(world.prod, "status", "--porcelain") == ""
+
+
+def test_un_conflicto_distinto_al_revisado_sigue_bloqueando(world, tmp_path):
+    _same_conflict(world)
+    _record_resolution(world, "v0.3.0", {"app.py": "A = 3\nB = propio\n"}, tmp_path)
+    # upstream publica otra version que choca de otra forma
+    commit(world.up, {"app.py": "A = 4\nB = otro\n"}, "upstream vuelve a cambiar")
+    git(world.up, "tag", "-a", "v0.4.0", "-m", "r")
+    cand = _prepare(world, "v0.4.0")
+    assert cand.verdict == Verdict.BLOCKED
+    assert cand.conflicts == ["app.py"]
+    assert "recorded_resolutions" not in cand.analysis
+
+
+def test_resolucion_de_solo_uno_de_dos_ficheros_bloquea(world, tmp_path):
+    commit(world.prod, {"app.py": "A = 1\nB = propio\n", "hermes_state_common.py": "SCHEMA_VERSION = 31\n# propio\n"},
+           "fix: dos cambios propios")
+    commit(world.up, {"app.py": "A = 3\nB = upstream\n", "hermes_state_common.py": "SCHEMA_VERSION = 31\n# upstream\n"},
+           "upstream choca en dos ficheros")
+    git(world.up, "tag", "-a", "v0.3.0", "-m", "r")
+    _record_resolution(world, "v0.3.0", {"app.py": "A = 3\nB = propio\n",
+                                         "hermes_state_common.py": "SCHEMA_VERSION = 31\n# ambos\n"}, tmp_path)
+    # se pierde la resolucion de uno de los dos ficheros
+    import shutil
+    entries = sorted(p for p in world.cfg.resolutions_dir.iterdir() if p.is_dir())
+    assert len(entries) == 2
+    shutil.rmtree(entries[0])
+    cand = _prepare(world, "v0.3.0")
+    assert cand.verdict == Verdict.BLOCKED
+    assert sorted(cand.conflicts) == ["app.py", "hermes_state_common.py"]
+
+
 def test_commit_propio_ya_incorporado_upstream_se_identifica(world):
     commit(world.up, {"hermes_layer2/menu.py": "MENU = 1\n"}, "upstream adopta el menu")
     git(world.up, "tag", "-a", "v0.3.0", "-m", "r")
@@ -99,6 +172,22 @@ def test_venv_del_candidato_y_lock(world):
     assert Path(cand.deps["lock"]).is_file()
     installs = [c for c in world.runner.calls if "install" in c and "-e" in c]
     assert any(c[-1].endswith("[telegram]") for c in installs)
+
+
+def test_el_venv_copiado_no_arrastra_pyc_de_pytest_con_rutas_de_produccion(world):
+    # 2026-10-18: pytest no corrige la ruta de sus *-pytest-*.pyc al cargarlos; el
+    # venv copiado seguia apuntando al de produccion y v0.22.2 abortaba la suite.
+    cache = world.prod / ".venv" / "lib" / "python3.11" / "site-packages" / "plug" / "__pycache__"
+    cache.mkdir(parents=True)
+    (cache / "plugin.cpython-311-pytest-9.1.1.pyc").write_bytes(b"x")
+    (cache / "plugin.cpython-311.pyc").write_bytes(b"x")
+    cand = _prepare(world, build_venv=True)
+    assert cand.verdict == Verdict.PASS, cand.detail
+    copied = Path(cand.venv) / "lib" / "python3.11" / "site-packages" / "plug" / "__pycache__"
+    assert not (copied / "plugin.cpython-311-pytest-9.1.1.pyc").exists()
+    assert (copied / "plugin.cpython-311.pyc").exists()                 # los normales se quedan
+    assert (cache / "plugin.cpython-311-pytest-9.1.1.pyc").exists()     # produccion intacta
+    assert cand.deps["stale_pytest_pyc_removed"] == 1
 
 
 def test_extras_inferidos():
@@ -175,6 +264,103 @@ def test_solo_fallos_preexistentes_pasan_y_se_dice(world, tmp_path):
                           cand_repo=cand, pure_target=base, out=tmp_path / "out")
     assert s.verdict == Verdict.PASS
     assert "1 fallos preexistentes" in s.detail
+
+
+def test_un_modulo_que_no_se_puede_recoger_no_detiene_la_suite(world, tmp_path):
+    # 2026-10-18: v0.22.2 trae un test de upstream que falla al recogerse
+    # (NameError); interrumpia la suite entera y quedaba en 0 tests ejecutados.
+    files = {"tests/test_a.py": "def test_ok():\n    assert True\n",
+             "tests/test_roto.py": "x = Path('no importado')\n"}
+    cand = _repo_with_tests(tmp_path / "cand", files)
+    base = _repo_with_tests(tmp_path / "base", files)
+    s = ci.upstream_suite(world.cfg, world.runner, "x", ["tests/test_*.py"], python=sys.executable,
+                          cand_repo=cand, pure_target=base, out=tmp_path / "out")
+    assert s.passed == 1
+    assert s.verdict == Verdict.PASS, s.detail
+    assert s.preexisting == ["tests/test_roto.py"]
+
+
+def test_un_modulo_que_solo_el_candidato_rompe_es_regresion(world, tmp_path):
+    cand = _repo_with_tests(tmp_path / "cand", {"tests/test_a.py": "def test_ok():\n    assert True\n",
+                                                "tests/test_b.py": "x = Path('roto')\n"})
+    base = _repo_with_tests(tmp_path / "base", {"tests/test_a.py": "def test_ok():\n    assert True\n",
+                                                "tests/test_b.py": "def test_b():\n    assert True\n"})
+    s = ci.upstream_suite(world.cfg, world.runner, "x", ["tests/test_*.py"], python=sys.executable,
+                          cand_repo=cand, pure_target=base, out=tmp_path / "out")
+    assert s.verdict == Verdict.FAIL
+    assert s.regressions == ["tests/test_b.py"]
+
+
+def test_un_fallo_que_pasa_al_repetirlo_es_inestable_y_se_dice(world, tmp_path):
+    flag = tmp_path / "ya-fallo"
+    body = (f"import pathlib\nF = pathlib.Path({str(flag)!r})\n"
+            "def test_a_veces():\n"
+            "    if not F.exists():\n        F.write_text('x')\n        assert False\n")
+    cand = _repo_with_tests(tmp_path / "cand", {"tests/test_a.py": body})
+    base = _repo_with_tests(tmp_path / "base", {"tests/test_a.py": "def test_a_veces():\n    assert True\n"})
+    s = ci.upstream_suite(world.cfg, world.runner, "x", ["tests/test_a.py"], python=sys.executable,
+                          cand_repo=cand, pure_target=base, out=tmp_path / "out")
+    assert s.verdict == Verdict.PASS
+    assert s.flaky == ["tests/test_a.py::test_a_veces"] and s.regressions == []
+    assert "1 inestables" in s.detail
+    ev = review.build_evidence(versions={}, backup={}, candidate={}, tests=[s.to_dict()], git_log="", home="/nadie")
+    assert ev["tests"][0]["flaky"] == ["tests/test_a.py::test_a_veces"]
+
+
+def test_inestable_con_ids_raros_y_duplicados(world, tmp_path):
+    # 2026-10-18: un fallo en la llamada y otro al desmontar duplicaban el id, y la
+    # cuenta "ids reconocidos <= pasados" descartaba TODOS los inestables.
+    flag = tmp_path / "ya-fallo"
+    body = (f"import pathlib, pytest\nF = pathlib.Path({str(flag)!r})\n"
+            "@pytest.fixture\ndef roto_al_salir():\n    yield\n"
+            "    if F.read_text() == '1':\n        F.write_text('2')\n        raise RuntimeError('teardown')\n"
+            "def test_a_veces(roto_al_salir):\n"
+            "    if not F.exists():\n        F.write_text('1')\n        assert False\n"
+            "@pytest.mark.parametrize('v', ['a\\\\nb', 'x y'])\n"
+            "def test_param_siempre_roto(v):\n    assert False\n")
+    cand = _repo_with_tests(tmp_path / "cand", {"tests/test_a.py": body})
+    s = ci.upstream_suite(world.cfg, world.runner, "x", ["tests/test_a.py"], python=sys.executable,
+                          cand_repo=cand, pure_target=None, out=tmp_path / "out")
+    assert s.flaky == ["tests/test_a.py::test_a_veces"]
+    assert sorted(s.regressions) == ["tests/test_a.py::test_param_siempre_roto[a\\\\nb]",
+                                     "tests/test_a.py::test_param_siempre_roto[x y]"]
+
+
+def test_un_fallo_que_se_repite_sigue_siendo_regresion(world, tmp_path):
+    cand = _repo_with_tests(tmp_path / "cand", {"tests/test_a.py": "def test_x():\n    assert False\n"})
+    base = _repo_with_tests(tmp_path / "base", {"tests/test_a.py": "def test_x():\n    assert True\n"})
+    s = ci.upstream_suite(world.cfg, world.runner, "x", ["tests/test_a.py"], python=sys.executable,
+                          cand_repo=cand, pure_target=base, out=tmp_path / "out")
+    assert s.verdict == Verdict.FAIL and s.flaky == [] and s.regressions == ["tests/test_a.py::test_x"]
+
+
+def test_pytest_sin_fsync_solo_si_existe_eatmydata(world, tmp_path, monkeypatch):
+    cand = _repo_with_tests(tmp_path / "cand", {"tests/test_a.py": "def test_ok():\n    assert True\n"})
+    fake = tmp_path / "eatmydata"
+    fake.write_text('#!/bin/sh\nexec "$@"\n')
+    fake.chmod(0o755)
+    monkeypatch.setattr(ci, "EATMYDATA", str(fake))
+    s = ci.upstream_suite(world.cfg, world.runner, "x", ["tests/test_a.py"], python=sys.executable,
+                          cand_repo=cand, pure_target=None, out=tmp_path / "o1")
+    assert s.verdict == Verdict.PASS
+    pyt = [c for c in world.runner.calls if "pytest" in c]
+    assert pyt and pyt[-1][pyt[-1].index(str(fake)) + 1] == sys.executable
+    monkeypatch.setattr(ci, "EATMYDATA", None)
+    ci.upstream_suite(world.cfg, world.runner, "x", ["tests/test_a.py"], python=sys.executable,
+                      cand_repo=cand, pure_target=None, out=tmp_path / "o2")
+    assert str(fake) not in [c for c in world.runner.calls if "pytest" in c][-1]
+
+
+def test_un_internalerror_de_pytest_es_fail_aunque_lo_demas_pase(world, tmp_path):
+    cand = _repo_with_tests(tmp_path / "cand", {
+        "tests/test_a.py": "def test_ok():\n    assert True\n",
+        "tests/conftest.py": "def pytest_runtest_logreport(report):\n"
+                             "    if report.when == 'call':\n        raise RuntimeError('pytest roto')\n"})
+    s = ci.upstream_suite(world.cfg, world.runner, "x", ["tests/test_a.py"], python=sys.executable,
+                          cand_repo=cand, pure_target=None, out=tmp_path / "out")
+    assert s.verdict == Verdict.FAIL
+    assert s.internal_error and "INTERNALERROR" in s.detail
+    assert not any("internal" in t for t in s.failed_ids)
 
 
 def test_cero_tests_ejecutados_no_es_pass(world, tmp_path):

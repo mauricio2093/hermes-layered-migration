@@ -247,6 +247,7 @@ def prepare(cfg: Config, runner: Runner, *, target_tag: str, target_commit: str,
         return cand
     git = Git(runner, repo)
     git("remote", "set-url", "origin", cfg.upstream_url)
+    recorded = _seed_recorded_resolutions(cfg, git, repo)
     pol = cfg.policy
     f = retry(lambda: git("fetch", "-q", "--no-tags", "origin",
                           f"+refs/tags/{target_tag}:refs/tags/{target_tag}",
@@ -280,6 +281,14 @@ def prepare(cfg: Config, runner: Runner, *, target_tag: str, target_commit: str,
            f"Candidate prepared by hermes-updater in an isolated clone.\n"
            f"source {source}\ntarget {target_commit} ({target_tag})")
     m = git("merge", "--no-ff", "--no-edit", "-m", msg, f"refs/tags/{target_tag}", timeout=900)
+    if not m.ok and recorded:
+        reused = _commit_recorded_resolution(git, repo, msg)
+        if reused:
+            cand.analysis["recorded_resolutions"] = reused
+            # solo las lineas en conflicto y como quedaron: lo que el auditor debe ver
+            cand.analysis["recorded_resolution_diff"] = git.out(
+                "show", "--cc", "--format=", "HEAD", "--", *reused)[:20_000]
+            m = Result(m.argv, 0, m.out, m.duration_s)
     if not m.ok:
         cand.conflicts = git.out("diff", "--name-only", "--diff-filter=U").split()
         git("merge", "--abort")
@@ -302,8 +311,47 @@ def prepare(cfg: Config, runner: Runner, *, target_tag: str, target_commit: str,
             cand.verdict, cand.detail = Verdict.FAIL, detail
             return cand
     cand.verdict = Verdict.PASS
-    cand.detail = f"merge limpio de {target_tag} sobre {branch}; {cand.analysis['carried_still_needed']} commits propios conservados"
+    how = ("merge de {t} sobre {b} con resoluciones revisadas en: " + ", ".join(cand.analysis["recorded_resolutions"])) \
+        if cand.analysis.get("recorded_resolutions") else "merge limpio de {t} sobre {b}"
+    cand.detail = how.format(t=target_tag, b=branch) + f"; {cand.analysis['carried_still_needed']} commits propios conservados"
     return cand
+
+
+def _seed_recorded_resolutions(cfg: Config, git: Git, repo: Path) -> bool:
+    """Copia (no enlaza) las resoluciones revisadas al clon y activa rerere.
+    rerere solo reaplica una resolucion si el conflicto es IDENTICO al que se
+    reviso (misma huella de los dos lados); cualquier otro sigue bloqueando."""
+    src = cfg.resolutions_dir
+    if not src.is_dir() or not any(src.iterdir()):
+        return False
+    shutil.copytree(src, repo / ".git" / "rr-cache", dirs_exist_ok=True)
+    git("config", "rerere.enabled", "true")
+    git("config", "rerere.autoUpdate", "false")
+    return True
+
+
+def _commit_recorded_resolution(git: Git, repo: Path, msg: str) -> list[str]:
+    """Tras un merge con conflictos: si rerere resolvio TODOS los ficheros, sin
+    marcas de conflicto, los confirma y devuelve la lista. Si queda uno solo
+    sin resolver, no toca nada y devuelve []: el llamador aborta y bloquea."""
+    unmerged = git.out("diff", "--name-only", "--diff-filter=U").split()
+    if not unmerged:
+        return []
+    remaining = git("rerere", "remaining")
+    if not remaining.ok or remaining.out.strip():
+        return []
+    marker = re.compile(r"^(<{7}|={7}|>{7})( |$)", re.M)
+    for f in unmerged:
+        p = repo / f
+        if not p.is_file() or marker.search(p.read_text(errors="replace")):
+            return []
+    if not git("add", "--", *unmerged).ok:
+        return []
+    body = msg + "\n\nConflicts resolved by reviewed recorded resolutions (git rerere):\n" + \
+        "".join(f"  {f}\n" for f in unmerged)
+    if not git("commit", "-q", "--no-verify", "-m", body).ok:
+        return []
+    return unmerged
 
 
 def build_staging_venv(cfg: Config, runner: Runner, cand: Candidate) -> tuple[bool, str]:
@@ -316,6 +364,15 @@ def build_staging_venv(cfg: Config, runner: Runner, cand: Candidate) -> tuple[bo
     if not cp.ok:
         return False, "no se pudo copiar el venv productivo: " + cp.tail(300)
     cand.venv = str(venv)
+    # pytest guarda en __pycache__ los modulos con las aserciones reescritas
+    # (*-pytest-*.pyc) y, al cargarlos, NO corrige la ruta de origen como hace
+    # importlib con los .pyc normales: el venv copiado seguiria apuntando al de
+    # produccion, dentro del HERMES_HOME real. v0.22.2 lo detecta (home_io_guard)
+    # y pytest muere con INTERNALERROR a mitad de upstream-core. Se regeneran.
+    stale = list(venv.rglob("*-pytest-*.pyc"))
+    for f in stale:
+        f.unlink()
+    cand.deps["stale_pytest_pyc_removed"] = len(stale)
     py = str(venv / "bin" / "python")
     fr = runner.run([py, "-m", "pip", "freeze", "--all"], timeout=300, keep=None)
     if not fr.ok:
