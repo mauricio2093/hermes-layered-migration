@@ -34,6 +34,7 @@ from .status import Verdict, worst
 UPSTREAM_CORE = ("tests/hermes_state", "tests/gateway/test_telegram*.py", "tests/hermes_cli/test_commands.py",
                  "tests/hermes_cli/test_config_migration*.py", "tests/hermes_cli/test_*plugin*.py")
 LAYER2 = ("tests/layer2",)
+EATMYDATA = shutil.which("eatmydata")
 
 
 @dataclass
@@ -48,6 +49,9 @@ class Suite:
     failed_ids: list = field(default_factory=list)
     preexisting: list = field(default_factory=list)
     regressions: list = field(default_factory=list)
+    #: fallaron y pasaron al repetirlos en el candidato: se informan, no se ocultan
+    flaky: list = field(default_factory=list)
+    internal_error: bool = False
     duration_s: float = 0.0
     detail: str = ""
     tail: str = ""
@@ -67,13 +71,17 @@ def wrapper(cfg: Config) -> list[str]:
 
 
 def parse_junit(path: Path) -> dict:
-    out = {"passed": 0, "failed": 0, "errors": 0, "skipped": 0, "failed_ids": []}
+    out = {"passed": 0, "failed": 0, "errors": 0, "skipped": 0, "failed_ids": [], "passed_ids": [],
+           "internal_error": False}
     try:
         root = ET.parse(path).getroot()
     except (ET.ParseError, OSError):
         return out
     for tc in root.iter("testcase"):
         kinds = {c.tag for c in tc}
+        if tc.get("classname") == "pytest" and tc.get("name") == "internal":
+            out["internal_error"] = True      # pytest murio: la suite quedo a medias
+            continue
         if "failure" in kinds:
             out["failed"] += 1
             out["failed_ids"].append(_nodeid(tc))
@@ -84,12 +92,19 @@ def parse_junit(path: Path) -> dict:
             out["skipped"] += 1
         else:
             out["passed"] += 1
+            out["passed_ids"].append(_nodeid(tc))
+    # un test que falla en la llamada y otra vez al desmontarse sale dos veces
+    out["failed_ids"] = list(dict.fromkeys(out["failed_ids"]))
     return out
 
 
 def _nodeid(tc) -> str:
     """classname 'tests.gateway.test_x.TestY' + name -> 'tests/gateway/test_x.py::TestY::name'."""
     cls = tc.get("classname") or ""
+    if not cls:
+        # error de COLECCION: pytest deja classname vacio y pone el modulo en name
+        # ('tests.hermes_cli.test_x'); el objetivo es el modulo entero.
+        return (tc.get("name") or "").replace(".", "/") + ".py"
     parts = cls.split(".")
     # el modulo es el ultimo trozo que empieza por test_
     idx = max((i for i, p in enumerate(parts) if p.startswith("test")), default=len(parts) - 1)
@@ -109,8 +124,14 @@ def expand(repo: Path, patterns: Sequence[str]) -> list[str]:
 def run_pytest(cfg: Config, runner: Runner, *, python: str, cwd: Path, targets: Sequence[str],
                junit: Path, env: Optional[dict] = None, timeout: Optional[int] = None) -> tuple[dict, object]:
     # basetemp en disco, junto al junit: /tmp es tmpfs (RAM) en este equipo
-    argv = [*wrapper(cfg), python, "-m", "pytest", "-q", "-p", "no:cacheprovider",
-            "-o", "addopts=-m 'not integration and not live'", f"--junitxml={junit}",
+    # eatmydata: las bases de los tests son desechables. En el disco mecanico de
+    # produccion cada sentencia DDL de SQLite espera a un fsync (~37 ms) y la
+    # suite upstream-core de v0.22.2 no terminaba en 60 min; con eatmydata el
+    # mismo fichero pasa de 73 s a 3 s. Solo afecta a este proceso de pytest.
+    nofsync = [EATMYDATA] if EATMYDATA and Path(EATMYDATA).is_file() else []
+    argv = [*wrapper(cfg), *nofsync, python, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+            "-o", "addopts=-m 'not integration and not live'", "--continue-on-collection-errors",
+            f"--junitxml={junit}",
             f"--basetemp={junit.with_suffix('.tmp')}", *targets]
     base_env = {"PYTHONDONTWRITEBYTECODE": "1", "HERMES_UPDATER_UNDER_TEST": "1"}
     if env:
@@ -123,8 +144,31 @@ def run_pytest(cfg: Config, runner: Runner, *, python: str, cwd: Path, targets: 
 def _fill(s: Suite, res: dict, r) -> None:
     s.passed, s.failed, s.errors, s.skipped = res["passed"], res["failed"], res["errors"], res["skipped"]
     s.failed_ids = res["failed_ids"]
+    s.internal_error = res["internal_error"]
     s.duration_s = r.duration_s
     s.tail = r.tail(3000)
+
+
+def recheck(cfg: Config, runner: Runner, s: Suite, *, python: str, cwd: Path, junit: Path,
+            env: Optional[dict] = None) -> None:
+    """Repite UNA vez los fallidos en el propio candidato. Los que pasan son
+    inestables (carga del equipo, tiempos): quedan en ``s.flaky`` y en el
+    detalle, no como regresion. Si la repeticion no ejecuta nada, no se
+    descarta ninguno."""
+    if not s.failed_ids:
+        return
+    res, _ = run_pytest(cfg, runner, python=python, cwd=cwd, targets=s.failed_ids, junit=junit, env=env,
+                        timeout=cfg.policy.test_timeout_s)
+    if res["passed"] + res["failed"] + res["errors"] == 0:
+        return
+    still = set(res["failed_ids"])
+    passed = set(res["passed_ids"])
+    # solo es inestable lo que la repeticion vio PASAR con ese mismo id; un id que
+    # no aparece (no se pudo seleccionar) sigue contando como fallo
+    s.flaky = [t for t in s.failed_ids if t in passed and t not in still]
+    s.failed_ids = [t for t in s.failed_ids if t not in s.flaky]
+    if s.flaky:
+        s.detail += f" | {len(s.flaky)} inestables (fallaron y pasaron al repetirlos): " + ", ".join(s.flaky[:10])
 
 
 def classify(cfg: Config, runner: Runner, s: Suite, *, python: str, baseline_cwd: Path,
@@ -151,6 +195,9 @@ def classify(cfg: Config, runner: Runner, s: Suite, *, python: str, baseline_cwd
 def _finish(s: Suite, r) -> None:
     if r.timed_out:
         s.verdict, s.detail = Verdict.FAIL, f"timeout tras {r.duration_s:.0f}s"
+    elif s.internal_error:
+        s.verdict = Verdict.FAIL
+        s.detail = (f"pytest INTERNALERROR: la suite no termino ({s.passed} ok antes de morir)" + s.detail)
     elif s.passed + s.failed + s.errors == 0:
         s.verdict, s.detail = Verdict.FAIL, "no se ejecuto ningun test (" + (r.tail(300).strip() or "sin salida") + ")"
     elif s.regressions:
@@ -173,6 +220,8 @@ def upstream_suite(cfg: Config, runner: Runner, name: str, patterns: Sequence[st
     res, r = run_pytest(cfg, runner, python=python, cwd=cand_repo, targets=targets,
                         junit=out / f"{name}.xml", env={"PYTHONPATH": str(cand_repo)})
     _fill(s, res, r)
+    recheck(cfg, runner, s, python=python, cwd=cand_repo, junit=out / f"{name}-recheck.xml",
+            env={"PYTHONPATH": str(cand_repo)})
     if pure_target is not None:
         classify(cfg, runner, s, python=python, baseline_cwd=pure_target, junit=out / f"{name}-baseline.xml",
                  env={"PYTHONPATH": str(pure_target)})
@@ -192,6 +241,8 @@ def hermes_control_suite(cfg: Config, runner: Runner, *, python: str, cand_repo:
     res, r = run_pytest(cfg, runner, python=python, cwd=repo, targets=["tests"], junit=out / "hermes-control.xml",
                         env={"PYTHONPATH": pp(cand_repo)})
     _fill(s, res, r)
+    recheck(cfg, runner, s, python=python, cwd=repo, junit=out / "hermes-control-recheck.xml",
+            env={"PYTHONPATH": pp(cand_repo)})
     classify(cfg, runner, s, python=python, baseline_cwd=repo, junit=out / "hermes-control-baseline.xml",
              env={"PYTHONPATH": pp(cfg.prod_repo)})
     _finish(s, r)
