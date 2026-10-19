@@ -395,6 +395,38 @@ def test_exec_start_command_ignora_los_datos_de_ejecucion():
     assert exec_start_command(b) != exec_start_command(c)
 
 
+def test_activo_y_estable_pero_sin_conectar_a_telegram_revierte(world, tmp_path):
+    # 2026-10-19: v0.22.2 cumplio "20 s estable" antes de conectar a Telegram.
+    o, code, payload = _prepared(world, tmp_path)
+    head = git(world.prod, "rev-parse", "HEAD")
+    world.svc.log = "gateway started\n[Telegram] Connecting to Telegram (attempt 1/8)\n"
+    o.cfg = replace(o.cfg, policy=replace(o.cfg.policy, service_ready_timeout_s=40))
+    _approve(world, code)
+    rid, out = o.apply()
+    assert out != Outcome.SUCCESS
+    assert git(world.prod, "rev-parse", "HEAD") == head
+    assert "Connected to Telegram" in _check(world, rid, "service_recovery")["detail"]
+    assert _check(world, rid, "service_recovery")["verdict"] == "FAIL"
+
+
+def test_el_rollback_para_el_gateway_antes_de_tocar_el_codigo(world, tmp_path):
+    o, code, payload = _prepared(world, tmp_path)
+    world.runner.version_report = "0.1.0"            # fuerza el rollback en las post-pruebas
+    seen = {}
+    real_stop = world.svc.stop
+
+    def stop_y_mira_el_codigo():
+        seen["head_al_parar"] = git(world.prod, "rev-parse", "HEAD")
+        return real_stop()
+    world.svc.stop = stop_y_mira_el_codigo
+    _approve(world, code)
+    rid, out = o.apply()
+    assert out == Outcome.ROLLED_BACK
+    assert seen["head_al_parar"] == payload["candidate"]["commit"]   # se paro con el codigo nuevo aun puesto
+    assert world.svc.events[-2:] == ["stop", "restart"]
+    assert _check(world, rid, "rollback_stop")["verdict"] == "PASS"
+
+
 def test_gateway_que_no_reinicia_hace_rollback(world, tmp_path):
     o, code, payload = _prepared(world, tmp_path)
     head = git(world.prod, "rev-parse", "HEAD")

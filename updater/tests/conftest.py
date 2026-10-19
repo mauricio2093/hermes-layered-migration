@@ -108,7 +108,8 @@ class FakeService:
         self.fail_restart = False
         self.fail_after_rollback = False
         self.exec = "ExecStart=/x/.venv/bin/python hermes_cli/main.py gateway run"
-        self.log = "gateway started\ntelegram connected\n"
+        self.log = "gateway started\n[Telegram] Connected to Telegram (polling mode)\n"
+        self.events = []        # orden de stop/restart, para comprobar el del rollback
         self.unit = "hermes-gateway.service"
 
     def is_active(self):
@@ -126,7 +127,13 @@ class FakeService:
         return (f"{{ path={self.exec.split()[0].split('=', 1)[1]} ; argv[]={self.exec.split('=', 1)[1]} ; "
                 f"ignore_errors=no ; start_time=[{self.restarts_called}] ; pid={self.main_pid()} ; status=0/0 }}")
 
+    def stop(self):
+        self.events.append("stop")
+        self.active = False
+        return True
+
     def restart(self):
+        self.events.append("restart")
         self.restarts_called += 1
         fail = self.fail_after_rollback if self.restarts_called > 1 else self.fail_restart
         self.active = not fail

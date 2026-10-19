@@ -53,8 +53,12 @@ class Policy:
     aux_auto_update: tuple = ("claude", "codex", "opencode")
     aux_allow_major: bool = False
     # despliegue
-    service_ready_timeout_s: int = 120
+    # Arrancar y conectar a Telegram tarda ~45-60 s en este equipo (2026-10-19).
+    service_ready_timeout_s: int = 300
     service_stable_s: int = 20
+    #: "sano" exige ademas esta linea en el journal DESPUES del reinicio: activo
+    #: y estable no basta (v0.22.2 paso los 20 s antes de conectar). "" = sin ella.
+    service_ready_log: str = "Connected to Telegram"
     # notificaciones
     notify_transport: str = "hermes-send"  # hermes-send | file | none
     notify_target: str = "telegram"

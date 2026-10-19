@@ -161,8 +161,7 @@ def main(argv=None) -> int:
             print("bases restauradas desde el snapshot pre-despliegue:", ", ".join(restored))
         res = deploy.DeployResult(rollback_point=rp)
         ok = deploy.rollback(cfg, runner, svc, rp, res)
-        healthy, why = deploy.wait_healthy(svc, timeout_s=cfg.policy.service_ready_timeout_s,
-                                           stable_s=cfg.policy.service_stable_s)
+        healthy, why = deploy.wait_healthy(svc, **deploy.health_kwargs(cfg, rp.get("rollback_restart_at")))
         for s in res.steps:
             print(f"{s.verdict.value:8} {s.name:20} {s.detail}")
         print(f"servicio: {why}")

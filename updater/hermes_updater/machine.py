@@ -130,8 +130,8 @@ class Orchestrator:
                     else:
                         res = deploy.DeployResult(rollback_point=rp)
                         ok = deploy.rollback(self.cfg, self.runner, self.svc, rp, res)
-                        healthy, why = deploy.wait_healthy(self.svc, timeout_s=self.cfg.policy.service_ready_timeout_s,
-                                                           stable_s=self.cfg.policy.service_stable_s, sleep=self.sleep)
+                        healthy, why = deploy.wait_healthy(self.svc, sleep=self.sleep,
+                                                           **deploy.health_kwargs(self.cfg, rp.get("rollback_restart_at")))
                         result = f"rollback {'OK' if ok and healthy else 'FALLIDO'}: {why}"
                         if not (ok and healthy):
                             notify.enqueue(store, row["id"], f"incident:reconcile:{row['id']}", "incident",

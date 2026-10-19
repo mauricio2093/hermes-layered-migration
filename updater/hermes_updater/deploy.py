@@ -67,6 +67,9 @@ class SystemdUser:
     def restart(self) -> bool:
         return self.runner.run(["systemctl", "--user", "restart", self.unit], timeout=180).ok
 
+    def stop(self) -> bool:
+        return self.runner.run(["systemctl", "--user", "stop", self.unit], timeout=180).ok
+
     def daemon_reload(self) -> bool:
         return self.runner.run(["systemctl", "--user", "daemon-reload"], timeout=60).ok
 
@@ -76,8 +79,14 @@ class SystemdUser:
         return r.out
 
 
-def wait_healthy(svc, *, timeout_s: float, stable_s: float, sleep=time.sleep, clock=time.monotonic) -> tuple[bool, str]:
-    """Activo, con el MISMO PID durante stable_s y sin reinicios nuevos."""
+def wait_healthy(svc, *, timeout_s: float, stable_s: float, sleep=time.sleep, clock=time.monotonic,
+                 ready_log: str = "", ready_since: Optional[float] = None) -> tuple[bool, str]:
+    """Activo, con el MISMO PID durante stable_s y sin reinicios nuevos; y, si
+    hay ``ready_log``, esa linea en el journal desde ``ready_since``.
+
+    Activo y estable no basta: el 2026-10-19 v0.22.2 cumplio los 20 s cuando
+    todavia no se habia conectado a Telegram, y las post-pruebas corrieron
+    sobre un gateway a medio arrancar."""
     deadline = clock() + timeout_s
     base_restarts = svc.restarts()
     while clock() < deadline:
@@ -91,9 +100,24 @@ def wait_healthy(svc, *, timeout_s: float, stable_s: float, sleep=time.sleep, cl
                     ok = False
                     break
             if ok and pid:
-                return True, f"activo, PID {pid} estable {stable_s:.0f}s, sin reinicios"
+                if not ready_log or ready_since is None:
+                    return True, f"activo, PID {pid} estable {stable_s:.0f}s, sin reinicios"
+                while clock() < deadline:
+                    if not svc.is_active() or svc.main_pid() != pid:
+                        break
+                    if ready_log in svc.journal_since(ready_since):
+                        return True, f"activo, PID {pid} estable {stable_s:.0f}s, sin reinicios; '{ready_log}'"
+                    sleep(3)
+                else:
+                    return False, (f"activo y estable, pero sin '{ready_log}' en el journal tras "
+                                   f"{timeout_s:.0f}s: el gateway no termino de arrancar")
         sleep(2)
     return False, f"no sano tras {timeout_s:.0f}s (activo={svc.is_active()}, pid={svc.main_pid()}, reinicios={svc.restarts()})"
+
+
+def health_kwargs(cfg: Config, since: Optional[float]) -> dict:
+    return {"timeout_s": cfg.policy.service_ready_timeout_s, "stable_s": cfg.policy.service_stable_s,
+            "ready_log": cfg.policy.service_ready_log, "ready_since": since}
 
 
 # --- utilidades --------------------------------------------------------------------
@@ -321,8 +345,7 @@ def deploy(cfg: Config, runner: Runner, payload: dict, svc, *, persist: Callable
     if not svc.restart():
         res.add("restart", Verdict.FAIL, "systemctl restart fallo")
         return _rollback_and_verify(cfg, runner, svc, res, sleep=sleep, clock=clock, persist=persist)
-    ok, why = wait_healthy(svc, timeout_s=cfg.policy.service_ready_timeout_s, stable_s=cfg.policy.service_stable_s,
-                           sleep=sleep, clock=clock)
+    ok, why = wait_healthy(svc, sleep=sleep, clock=clock, **health_kwargs(cfg, restart_at))
     res.add("service_recovery", Verdict.PASS if ok else Verdict.FAIL, why)
     if not ok:
         return _rollback_and_verify(cfg, runner, svc, res, sleep=sleep, clock=clock, persist=persist)
@@ -383,8 +406,8 @@ def _rollback_and_verify(cfg, runner, svc, res: DeployResult, *, sleep, clock, p
     ok = rollback(cfg, runner, svc, res.rollback_point, res)
     res.rolled_back = ok
     persist("VERIFY_RECOVERY", {"phase": "verify_recovery"})
-    healthy, why = wait_healthy(svc, timeout_s=cfg.policy.service_ready_timeout_s, stable_s=cfg.policy.service_stable_s,
-                                sleep=sleep, clock=clock)
+    healthy, why = wait_healthy(svc, sleep=sleep, clock=clock,
+                                **health_kwargs(cfg, res.rollback_point.get("rollback_restart_at")))
     head = _git(runner, cfg.prod_repo, "rev-parse", "HEAD").out.strip()
     back = head == res.rollback_point.get("old_head")
     res.recovery_ok = bool(ok and healthy and back)
@@ -401,6 +424,11 @@ def rollback(cfg: Config, runner: Runner, svc, rp: dict, res: Optional[DeployRes
             res.add(n, Verdict.PASS if ok else Verdict.FAIL, d)
         return ok
     ok_all = True
+    # Primero PARAR: cambiar codigo y venv bajo un proceso vivo lo deja cargando
+    # modulos de las dos versiones (2026-10-19: el v0.22.2 aun arrancando
+    # importo run_agent.py ya revertido -> ModuleNotFoundError). Si no para, se
+    # sigue igualmente: dejar el codigo nuevo seria peor.
+    ok_all &= add("rollback_stop", svc.stop(), "gateway parado antes de restaurar")
     r = _git(runner, cfg.prod_repo, "reset", "--hard", "-q", rp["old_head"])
     ok_all &= add("rollback_code", r.ok, f"HEAD -> {rp['old_head'][:10]}" if r.ok else r.tail(300))
     venv, bak = Path(rp["venv"]), Path(rp["venv_backup"])
@@ -428,7 +456,8 @@ def rollback(cfg: Config, runner: Runner, svc, rp: dict, res: Optional[DeployRes
                 changed = True
     if changed:
         ok_all &= add("rollback_unit", svc.daemon_reload(), "unit/drop-ins restaurados y recargados")
-    ok_all &= add("rollback_restart", svc.restart(), "reinicio tras rollback")
+    rp["rollback_restart_at"] = time.time()
+    ok_all &= add("rollback_restart", svc.restart(), "arranque tras rollback")
     return ok_all
 
 

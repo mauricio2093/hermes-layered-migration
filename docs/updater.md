@@ -192,6 +192,30 @@ comando: código de salida + versión posterior + `--version`/`--help`; si algo
 falla, se restaura y se comprueba. Las tres ya se auto-actualizan solas (hoy
 lo hicieron a las 07:02 y 18:34); el orquestador cubre los días en que no.
 
+## Primer despliegue real de v0.22.2 (2026-10-19): revertido, y por qué
+
+El despliegue se revirtió solo y dejó producción como estaba (HEAD, venv, unit,
+gateway activo). Las dos post-pruebas que fallaron eran defectos del
+actualizador, no de v0.22.2:
+
+- **Versión informada 0.21.3.** Hermes calcula su versión con los tags `v*`
+  alcanzables desde HEAD, y el despliegue traía la rama del candidato sin el
+  tag. Ahora trae `refs/tags/vX` y comprueba que apunta al commit aprobado.
+- **"La unit cambió".** Se comparaba la línea entera de `systemctl show -p
+  ExecStart`, que lleva pid y hora de arranque. Ahora solo ruta y argv. La unit
+  y el drop-in eran idénticos byte a byte al backup.
+
+Y dos debilidades que el incidente dejó a la vista:
+
+- **Sano no es solo "activo 20 s".** v0.22.2 superó esa marca sin haberse
+  conectado aún a Telegram. Ahora hace falta además `Connected to Telegram` en
+  el journal después del reinicio (`service_ready_log`); el margen pasa a
+  300 s.
+- **El rollback cambiaba el código con el gateway vivo.** El proceso de v0.22.2,
+  que aún arrancaba, importó un módulo ya revertido (`ModuleNotFoundError:
+  agent.session_source`). Ahora el rollback para el gateway, restaura código,
+  venv y unit, y lo arranca.
+
 ## Resoluciones de conflicto revisadas
 
 Un merge con conflictos se aborta y el candidato queda BLOCKED, salvo que el
