@@ -326,6 +326,23 @@ def test_inestable_con_ids_raros_y_duplicados(world, tmp_path):
                                      "tests/test_a.py::test_param_siempre_roto[x y]"]
 
 
+def test_muchos_inestables_a_la_vez_no_son_inestabilidad(world, tmp_path, monkeypatch):
+    # 2026-10-19: bajo systemd, el limite de 1024 descriptores tumbo 940 tests
+    # ("Too many open files"); al repetirlos pasaban y salian 1075 "inestables".
+    monkeypatch.setattr(ci, "FLAKY_MAX", 2)
+    flag = tmp_path / "ya-fallo"
+    tests = "".join(f"def test_{i}():\n    if not F{i}.exists():\n        F{i}.write_text('x')\n        assert False\n"
+                    for i in range(4))
+    head = "import pathlib\n" + "".join(f"F{i} = pathlib.Path({str(flag)!r} + '{i}')\n" for i in range(4))
+    cand = _repo_with_tests(tmp_path / "cand", {"tests/test_a.py": head + tests})
+    base = _repo_with_tests(tmp_path / "base", {"tests/test_a.py": "".join(f"def test_{i}():\n    pass\n" for i in range(4))})
+    s = ci.upstream_suite(world.cfg, world.runner, "x", ["tests/test_a.py"], python=sys.executable,
+                          cand_repo=cand, pure_target=base, out=tmp_path / "out")
+    assert s.verdict == Verdict.FAIL
+    assert s.flaky == [] and len(s.regressions) == 4
+    assert "demasiados para ser inestabilidad" in s.detail
+
+
 def test_un_fallo_que_se_repite_sigue_siendo_regresion(world, tmp_path):
     cand = _repo_with_tests(tmp_path / "cand", {"tests/test_a.py": "def test_x():\n    assert False\n"})
     base = _repo_with_tests(tmp_path / "base", {"tests/test_a.py": "def test_x():\n    assert True\n"})

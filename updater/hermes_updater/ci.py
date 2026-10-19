@@ -35,6 +35,9 @@ UPSTREAM_CORE = ("tests/hermes_state", "tests/gateway/test_telegram*.py", "tests
                  "tests/hermes_cli/test_config_migration*.py", "tests/hermes_cli/test_*plugin*.py")
 LAYER2 = ("tests/layer2",)
 EATMYDATA = shutil.which("eatmydata")
+#: tope de tests "inestables" aceptables por suite: el mayor de los dos
+FLAKY_MAX = 5
+FLAKY_MAX_RATIO = 0.01
 
 
 @dataclass
@@ -165,7 +168,16 @@ def recheck(cfg: Config, runner: Runner, s: Suite, *, python: str, cwd: Path, ju
     passed = set(res["passed_ids"])
     # solo es inestable lo que la repeticion vio PASAR con ese mismo id; un id que
     # no aparece (no se pudo seleccionar) sigue contando como fallo
-    s.flaky = [t for t in s.failed_ids if t in passed and t not in still]
+    flaky = [t for t in s.failed_ids if t in passed and t not in still]
+    ran = s.passed + s.failed + s.errors
+    if len(flaky) > max(FLAKY_MAX, int(ran * FLAKY_MAX_RATIO)):
+        # Demasiados para ser inestabilidad: algo del ENTORNO de la suite (p. ej.
+        # el limite de descriptores del servicio, 2026-10-19: 940 "Too many open
+        # files") los tumbo en cascada. No se descarta ninguno.
+        s.detail += (f" | {len(flaky)} fallaron y pasaron al repetirlos: demasiados para ser inestabilidad"
+                     f" (maximo {max(FLAKY_MAX, int(ran * FLAKY_MAX_RATIO))}); se cuentan como fallos")
+        return
+    s.flaky = flaky
     s.failed_ids = [t for t in s.failed_ids if t not in s.flaky]
     if s.flaky:
         s.detail += f" | {len(s.flaky)} inestables (fallaron y pasaron al repetirlos): " + ", ".join(s.flaky[:10])

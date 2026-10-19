@@ -27,6 +27,10 @@ IOSchedulingClass=idle
 # Las suites corren en su propio scope (systemd-run --scope, MemoryMax=1800M);
 # este limite cubre al orquestador y a pip/git.
 MemoryMax=2G
+# El gestor de usuario arranca los servicios con un limite blando de 1024
+# descriptores (la terminal tiene 524288). Las suites de upstream abren muchos:
+# el 2026-10-19 940 tests cayeron en cascada con "Too many open files".
+LimitNOFILE=65536
 NoNewPrivileges=yes
 # SIN RestrictSUIDSGID: con tar 1.35 en este kernel, su filtro seccomp hace que
 # TODA creacion de fichero de tar falle ("Cannot open: Function not

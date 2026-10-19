@@ -12,4 +12,8 @@ ExecStart=%h/.local/bin/hermes-updater apply
 TimeoutStartSec=45min
 UMask=0077
 MemoryMax=1500M
+# El gestor de usuario arranca los servicios con un limite blando de 1024
+# descriptores (la terminal tiene 524288). Las suites de upstream abren muchos:
+# el 2026-10-19 940 tests cayeron en cascada con "Too many open files".
+LimitNOFILE=65536
 NoNewPrivileges=yes
