@@ -286,6 +286,30 @@ def test_cutover_aprobado_completo(world, tmp_path):
     assert out2 == Outcome.BLOCKED
 
 
+def test_un_candidato_revocado_no_se_despliega_aunque_se_apruebe(world, tmp_path):
+    from hermes_updater import cli
+    o, code, payload = _prepared(world, tmp_path)
+    head = git(world.prod, "rev-parse", "HEAD")
+    cfgp = tmp_path / "cfg.toml"
+    cfgp.write_text(f'state_dir = "{world.cfg.state_dir}"\n[policy]\nnotify_transport = "file"\n')
+    assert cli.main(["--config", str(cfgp), "revoke", code, "--reason", "probado con el entorno roto"]) == 0
+    _approve(world, code)
+    rid, out = o.apply()
+    assert out == Outcome.BLOCKED
+    assert git(world.prod, "rev-parse", "HEAD") == head and world.svc.restarts_called == 0
+    s = Store(world.cfg.db_path)
+    assert s.candidate(code)["status"] == "REVOKED"
+    s.close()
+    # revocar no aplaza el objetivo 72 h: la siguiente ejecucion prepara otro
+    rid2, out2 = o.daily("manual")
+    assert out2 == Outcome.PENDING_APPROVAL
+    s = Store(world.cfg.db_path)
+    assert s.pending_candidate()["id"] != code
+    s.close()
+    # y no se revoca dos veces
+    assert cli.main(["--config", str(cfgp), "revoke", code, "--reason", "x"]) == 6
+
+
 def test_aprobacion_reutilizada_no_vale(world, tmp_path):
     o, code, payload = _prepared(world, tmp_path)
     _approve(world, code)

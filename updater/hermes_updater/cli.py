@@ -6,6 +6,7 @@
   hermes-updater apply [--candidate ID]          (exige aprobacion atestiguada por TOTP)
   hermes-updater rollback --run N [--hard]       (manual; --hard restaura las bases)
   hermes-updater status | flush | checks --run N
+  hermes-updater revoke CODIGO --reason TEXTO   (anula un candidato pendiente)
 
 Codigos de salida (como hermes-maint: un hallazgo nunca se pinta de verde):
   0 SUCCESS / NO_UPDATES     3 otra ejecucion tiene el candado
@@ -31,6 +32,34 @@ EXIT = {Outcome.SUCCESS: 0, Outcome.NO_UPDATES: 0, Outcome.PENDING_APPROVAL: 4, 
         Outcome.FAILED: 7, Outcome.INTERRUPTED: 7, Outcome.ROLLED_BACK: 8, Outcome.RECOVERY_FAILED: 9}
 
 
+def _revoke(cfg, runner, code: str, reason: str) -> int:
+    """Anula un candidato PENDIENTE: apply rechaza todo lo que no este en
+    PENDING_APPROVAL, asi que una aprobacion posterior con ese codigo no
+    despliega nada. No cuenta como fallo del objetivo (sin espera de 72 h):
+    la siguiente ejecucion lo vuelve a preparar desde cero."""
+    config.ensure_dirs(cfg)
+    st = Store(cfg.db_path)
+    try:
+        row = st.candidate(code)
+        if row is None:
+            print(f"no existe el candidato {code}")
+            return 6
+        if row["status"] != "PENDING_APPROVAL":
+            print(f"el candidato {code} esta {row['status']}: nada que revocar")
+            return 6
+        st.set_candidate_status(code, "REVOKED")
+        p = json.loads(row["payload"])
+        st.record_attempt(p["target"]["tag"], p["source"]["commit"], "REVOKED", reason)
+        notify.enqueue(st, row["run_id"], f"revoked:{code}", "revoked",
+                       f"HERMES — Candidato revocado\n\nCódigo: {code}\nMotivo: {reason}\n\n"
+                       "Ese código ya no aprueba nada. La próxima ejecución prepara un candidato nuevo.")
+        res = notify.flush(st, notify.transport_for(cfg, runner), retries=cfg.policy.notify_retries)
+    finally:
+        st.close()
+    print(f"candidato {code} revocado; aviso: {res}")
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="hermes-updater")
     ap.add_argument("--config", type=Path)
@@ -53,6 +82,9 @@ def main(argv=None) -> int:
     sub.add_parser("flush")
     c = sub.add_parser("checks")
     c.add_argument("--run", type=int, required=True)
+    rv = sub.add_parser("revoke")
+    rv.add_argument("code")
+    rv.add_argument("--reason", required=True)
     args = ap.parse_args(argv)
 
     cfg = config.load(args.config)
@@ -111,6 +143,8 @@ def main(argv=None) -> int:
     if args.cmd == "checks":
         _print_checks(cfg, args.run)
         return 0
+    if args.cmd == "revoke":
+        return _revoke(cfg, runner, args.code, args.reason)
     if args.cmd == "rollback":
         st = Store(cfg.db_path)
         try:
