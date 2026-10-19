@@ -143,6 +143,31 @@ def test_backup_fallido_bloquea_la_actualizacion(world, tmp_path):
     assert "STAGING_PREPARATION" not in _states(world, rid)
 
 
+def test_un_backup_fallido_no_aplaza_72_h_el_objetivo(world, tmp_path):
+    # 2026-10-19: la primera ejecucion real fallo en el backup por la unit
+    # (RestrictSUIDSGID); la siguiente, con el backup ya bien, no preparaba
+    # v0.22.2 durante 72 h como si el candidato hubiera fallado.
+    import sqlite3
+    intrusa = world.home / "intrusa.db"
+    sqlite3.connect(intrusa).execute("create table t(x)").connection.commit()
+    o = orch(world, tmp_path)
+    _, out = o.daily("manual")
+    assert out == Outcome.FAILED
+    intrusa.unlink()
+    rid2, out2 = o.daily("manual")
+    assert "STAGING_PREPARATION" in _states(world, rid2), out2
+    assert out2 == Outcome.PENDING_APPROVAL
+
+
+def test_las_filas_antiguas_de_backup_fallido_tampoco_aplazan(world, tmp_path):
+    s = Store(world.cfg.db_path)
+    head = git(world.prod, "rev-parse", "HEAD")
+    s.record_attempt("v0.2.0", head, "FAILED", "backup: backup A fallido: x")
+    s.close()
+    rid, out = orch(world, tmp_path).daily("manual")
+    assert "STAGING_PREPARATION" in _states(world, rid)
+
+
 def test_sin_internet(world, tmp_path):
     from hermes_updater.proc import Result
     import urllib.error

@@ -241,7 +241,12 @@ class Orchestrator:
             if p["target"]["tag"] == target and p["source"]["commit"] == source and pend["expires_at"] > self.clock():
                 return f"candidato {pend['id']} ya preparado y pendiente de aprobacion"
         last = store.last_attempt(target, source)
-        if last is not None and last["outcome"] in ("BLOCKED", "FAILED"):
+        # La espera es para fallos DEL CANDIDATO (merge, pruebas, revision). Un
+        # backup fallido no dice nada del objetivo: cada ejecucion repite el
+        # backup y sin el no se prepara nada, asi que no hay bucle que frenar.
+        # (Las filas antiguas lo registraban como FAILED "backup: ...".)
+        if last is not None and last["outcome"] in ("BLOCKED", "FAILED") \
+                and not (last["reason"] or "").startswith("backup:"):
             age_h = (self.clock() - last["at"]) / 3600
             if age_h < self.cfg.policy.retry_blocked_after_h:
                 return (f"el mismo objetivo ({target} sobre {source[:10]}) termino {last['outcome']} hace "
@@ -311,7 +316,7 @@ class Orchestrator:
         if b.verdict != Verdict.PASS:
             notify.enqueue(store, rid, f"backup-failed:pre:{target}:{source}", "backup_failed",
                            report.backup_failed("backup previo a actualizacion", b.detail))
-            store.record_attempt(target, source, "FAILED", "backup: " + b.detail)
+            store.record_attempt(target, source, "BACKUP_FAILED", "backup: " + b.detail)
             return Outcome.FAILED
 
         self._to(store, rid, State.STAGING_PREPARATION)
