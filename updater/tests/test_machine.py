@@ -312,6 +312,49 @@ def test_un_candidato_revocado_no_se_despliega_aunque_se_apruebe(world, tmp_path
     assert cli.main(["--config", str(cfgp), "revoke", code, "--reason", "x"]) == 6
 
 
+def _auto(o):
+    o.cfg = replace(o.cfg, policy=replace(o.cfg.policy, auto_apply=True))
+    return o
+
+
+def test_auto_apply_despliega_sin_totp_y_avisa(world, tmp_path):
+    o = _auto(orch(world, tmp_path))
+    rid, out = o.daily("timer")
+    assert out == Outcome.SUCCESS
+    s = Store(world.cfg.db_path)
+    st = [r for r in s.db.execute("select status from candidates")]
+    s.close()
+    assert [r["status"] for r in st] == ["DEPLOYED"]
+    assert not list(world.approvals.iterdir())                       # ningun fichero de aprobacion
+    assert "aplicacion automatica" in _check(world, rid, "attestation")["detail"]
+    msgs = _msgs(world)
+    assert any("Se aplica automáticamente" in m for m in msgs)
+    assert not any("Para aprobar" in m for m in msgs)
+    assert any(m.startswith("HERMES — Reporte de actualización") and "SUCCESS" in m for m in msgs)
+
+
+def test_auto_apply_que_falla_revierte_avisa_y_no_repite_cada_noche(world, tmp_path):
+    o = _auto(orch(world, tmp_path))
+    head = git(world.prod, "rev-parse", "HEAD")
+    world.runner.version_report = "0.1.0"            # las post-pruebas fallan
+    rid, out = o.daily("timer")
+    assert out == Outcome.ROLLED_BACK
+    assert git(world.prod, "rev-parse", "HEAD") == head
+    assert any("ROLLED_BACK" in m for m in _msgs(world) if m.startswith("HERMES — Reporte de actualización"))
+    restarts = world.svc.restarts_called
+    rid2, out2 = o.daily("timer")                    # la noche siguiente
+    assert world.svc.restarts_called == restarts     # no se vuelve a desplegar
+    assert "se revirtio" in _check(world, rid2, "preparation")["detail"]
+
+
+def test_trigger_auto_sin_la_politica_sigue_pidiendo_totp(world, tmp_path):
+    o, code, payload = _prepared(world, tmp_path)
+    head = git(world.prod, "rev-parse", "HEAD")
+    rid, out = o.apply(code, trigger="auto")
+    assert out == Outcome.BLOCKED
+    assert git(world.prod, "rev-parse", "HEAD") == head and world.svc.restarts_called == 0
+
+
 def test_aprobacion_reutilizada_no_vale(world, tmp_path):
     o, code, payload = _prepared(world, tmp_path)
     _approve(world, code)

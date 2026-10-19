@@ -53,6 +53,11 @@ class Policy:
     aux_auto_update: tuple = ("claude", "codex", "opencode")
     aux_allow_major: bool = False
     # despliegue
+    #: True: un candidato que pasa backup, merge, pruebas y revision IA sin
+    #: "block" se despliega en la MISMA ejecucion, sin aprobacion TOTP. Las
+    #: salvaguardas no cambian: backup previo, post-pruebas, rollback automatico
+    #: y aviso por Telegram. Decision del usuario (2026-10-19).
+    auto_apply: bool = False
     # Arrancar y conectar a Telegram tarda ~45-60 s en este equipo (2026-10-19).
     service_ready_timeout_s: int = 300
     service_stable_s: int = 20

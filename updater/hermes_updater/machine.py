@@ -145,7 +145,17 @@ class Orchestrator:
 
     # --- diario -------------------------------------------------------------------
     def daily(self, trigger: str = "timer") -> tuple[Optional[int], Outcome]:
-        return self._guarded("daily", trigger, self._daily)
+        rid, out = self._guarded("daily", trigger, self._daily)
+        if out == Outcome.PENDING_APPROVAL and self.cfg.policy.auto_apply:
+            # Mismo candidato, mismo payload: lo unico que cambia es quien autoriza.
+            s = Store(self.cfg.db_path)
+            try:
+                row = s.pending_candidate()
+            finally:
+                s.close()
+            if row is not None and row["run_id"] == rid:
+                return self.apply(row["id"], trigger="auto")
+        return rid, out
 
     def _daily(self, store: Store, rid: int) -> Outcome:
         cfg, pol = self.cfg, self.cfg.policy
@@ -245,6 +255,11 @@ class Orchestrator:
         # backup fallido no dice nada del objetivo: cada ejecucion repite el
         # backup y sin el no se prepara nada, asi que no hay bucle que frenar.
         # (Las filas antiguas lo registraban como FAILED "backup: ...".)
+        if last is not None and last["outcome"] == "ROLLED_BACK":
+            # Ya se desplego y fallo en produccion: no se repite cada noche. Se
+            # espera una version nueva (otro objetivo).
+            return (f"{target} sobre {source[:10]} ya se desplego y se revirtio: {last['reason'][:160]}; "
+                    "no se reintenta hasta que haya una version nueva")
         if last is not None and last["outcome"] in ("BLOCKED", "FAILED") \
                 and not (last["reason"] or "").startswith("backup:"):
             age_h = (self.clock() - last["at"]) / 3600
@@ -395,7 +410,7 @@ class Orchestrator:
             expires=time.strftime("%Y-%m-%d %H:%M", time.localtime(payload["expires_at"])),
             checks={"backup": b.verdict.value, "sqlite": "PASS" if sqlite_ok else "FAIL", "review": rv.verdict.value,
                     "layer2": layer2.value, "tests": tests_v.value, "rollback": "PASS"},
-            review_note=rv.summary or rv.detail))
+            review_note=rv.summary or rv.detail, auto=cfg.policy.auto_apply))
         store.record_attempt(target, source, "PENDING_APPROVAL", code)
         return Outcome.PENDING_APPROVAL
 
@@ -411,9 +426,10 @@ class Orchestrator:
 
     # --- aplicacion aprobada ----------------------------------------------------------
     def apply(self, candidate_id: Optional[str] = None, trigger: str = "approval") -> tuple[Optional[int], Outcome]:
-        return self._guarded("apply", trigger, lambda s, r: self._apply(s, r, candidate_id))
+        auto = trigger == "auto" and self.cfg.policy.auto_apply
+        return self._guarded("apply", trigger, lambda s, r: self._apply(s, r, candidate_id, auto=auto))
 
-    def _apply(self, store: Store, rid: int, candidate_id: Optional[str]) -> Outcome:
+    def _apply(self, store: Store, rid: int, candidate_id: Optional[str], *, auto: bool = False) -> Outcome:
         cfg = self.cfg
         self._to(store, rid, State.AUTHORIZATION_GATE)
         row = store.candidate(candidate_id) if candidate_id else store.pending_candidate()
@@ -428,8 +444,13 @@ class Orchestrator:
         if approval.candidate_code(payload) != code:
             store.check(rid, "approval", "candidate", Verdict.BLOCKED, detail="el payload guardado no corresponde a su codigo")
             return Outcome.BLOCKED
-        ok, why, _ = approval.check(cfg.approvals_dir, payload, owner_uid=cfg.approvals_owner_uid,
-                                    approval_ttl_s=cfg.policy.approval_ttl_s, now=self.clock())
+        if auto:
+            expired = payload.get("expires_at") is not None and payload["expires_at"] < self.clock()
+            ok, why = (not expired), ("candidato caducado" if expired else
+                                       "aplicacion automatica (policy.auto_apply): sin TOTP por decision del usuario")
+        else:
+            ok, why, _ = approval.check(cfg.approvals_dir, payload, owner_uid=cfg.approvals_owner_uid,
+                                        approval_ttl_s=cfg.policy.approval_ttl_s, now=self.clock())
         store.check(rid, "approval", "attestation", Verdict.PASS if ok else Verdict.BLOCKED, detail=why)
         if not ok:
             if "caducado" in why and "candidato" in why:
@@ -476,6 +497,10 @@ class Orchestrator:
                 actions=[f"{s.name}: {s.verdict.value} {s.detail[:120]}" for s in res.steps[-8:]],
                 current="gateway NO verificado; acciones automaticas detenidas",
                 evidence=f"run {rid}; hard rollback manual: hermes-updater rollback --run {rid} --hard"))
+        if outcome in (Outcome.ROLLED_BACK, Outcome.RECOVERY_FAILED):
+            fails = [f"{s.name}: {s.detail[:120]}" for s in res.steps if s.verdict != Verdict.PASS]
+            store.record_attempt(payload["target"]["tag"], payload["source"]["commit"], "ROLLED_BACK",
+                                 "; ".join(fails)[:480] or "revertido")
         self._to(store, rid, State.TELEGRAM_REPORT)
         after = versions.hermes_installed(cfg, self.runner)
         steps = {s.name: s.verdict.value for s in res.steps}

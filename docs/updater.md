@@ -192,6 +192,24 @@ comando: código de salida + versión posterior + `--version`/`--help`; si algo
 falla, se restaura y se comprueba. Las tres ya se auto-actualizan solas (hoy
 lo hicieron a las 07:02 y 18:34); el orquestador cubre los días en que no.
 
+## Modo automático (`auto_apply`)
+
+Desde el 2026-10-19, a petición del usuario: con `auto_apply = true` en
+`~/.local/state/hermes-updater/config.toml` (sección `[policy]`), un candidato
+que pasa backup, merge, pruebas y revisión IA sin `block` se despliega en la
+misma ejecución nocturna, **sin aprobación TOTP**. Nada más cambia:
+
+- backup previo verificado, post-pruebas (versión, unit, logs, plugins,
+  persistencia, config, conexión a Telegram) y rollback automático;
+- aviso por Telegram al preparar ("se aplica automáticamente") y el informe
+  final con el motivo si se revirtió;
+- una versión que se desplegó y se revirtió **no se vuelve a intentar**: se
+  espera a la siguiente versión de upstream, así que no hay un ciclo de
+  despliegue y rollback cada noche;
+- la IA puede bloquear (`block`), pero nunca autoriza nada.
+
+Para volver a la aprobación manual: `auto_apply = false`.
+
 ## Primer despliegue real de v0.22.2 (2026-10-19): revertido, y por qué
 
 El despliegue se revirtió solo y dejó producción como estaba (HEAD, venv, unit,

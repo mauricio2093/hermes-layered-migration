@@ -72,13 +72,18 @@ def blocked(source: str, target: str, phase: str, detail: str, extra: list[str] 
     return "\n".join(lines)
 
 
-def prepared(*, source: str, target: str, checks: dict, code: str, expires: str, review_note: str = "") -> str:
+def prepared(*, source: str, target: str, checks: dict, code: str, expires: str, review_note: str = "",
+             auto: bool = False) -> str:
     order = [("backup", "Backup restaurable"), ("sqlite", "Integridad SQLite"), ("review", "Revisión IA"),
              ("layer2", "Compatibilidad Layer 2"), ("tests", "Tests"), ("rollback", "Rollback preparado")]
     lines = ["HERMES — Actualización preparada", "", f"Origen: {source}", f"Destino: {target}", ""]
     lines += [f"{label}: {checks.get(k, 'NOT_OBSERVED')}" for k, label in order]
     if review_note:
         lines.append(f"  IA: {review_note[:300]}")
+    if auto:
+        lines += ["", "Se aplica automáticamente ahora (auto_apply).",
+                  "Si algo falla, vuelve sola a la versión actual y te llega el motivo."]
+        return "\n".join(lines)
     lines += ["", "Estado: PENDING_APPROVAL", "", "Se requiere autorización para producción.",
               f"Caduca: {expires}", "", "Para aprobar (pide el código TOTP):", approve_command(code)]
     return "\n".join(lines)
