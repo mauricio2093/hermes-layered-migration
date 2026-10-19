@@ -8,6 +8,10 @@ Documentation=https://github.com/mauricio2093/hermes-layered-migration/blob/main
 [Service]
 Type=oneshot
 Environment=HERMES_HOME=%h/.hermes
+# El PATH del gestor de usuario no incluye ~/.local/bin (claude, codex) ni
+# ~/.opencode/bin: sin esto, la deteccion de versiones los daba por "no
+# instalados" (2026-10-19, primera ejecucion real).
+Environment=PATH=%h/.local/bin:%h/.opencode/bin:/usr/local/bin:/usr/bin:/bin
 ExecStart=%h/.local/bin/hermes-updater run --trigger timer
 # 3 = otra ejecucion tiene el candado (el candado funcionando).
 # 4 = candidato preparado y PENDIENTE de aprobacion: es el resultado esperado
@@ -24,6 +28,10 @@ IOSchedulingClass=idle
 # este limite cubre al orquestador y a pip/git.
 MemoryMax=2G
 NoNewPrivileges=yes
-RestrictSUIDSGID=yes
+# SIN RestrictSUIDSGID: con tar 1.35 en este kernel, su filtro seccomp hace que
+# TODA creacion de fichero de tar falle ("Cannot open: Function not
+# implemented"). El restore temporal del backup diario no extraia nada y el
+# backup quedaba sin verificar (2026-10-19, primera ejecucion real; aislado
+# probando cada propiedad por separado).
 LockPersonality=yes
 # Sin [Install]: lo activa el timer.
