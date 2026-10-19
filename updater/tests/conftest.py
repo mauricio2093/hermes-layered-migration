@@ -121,7 +121,10 @@ class FakeService:
         return self.nrestarts
 
     def exec_start(self):
-        return self.exec
+        # como systemctl show: ruta + argv, y datos de ejecucion que cambian
+        # en cada reinicio (start_time, pid)
+        return (f"{{ path={self.exec.split()[0].split('=', 1)[1]} ; argv[]={self.exec.split('=', 1)[1]} ; "
+                f"ignore_errors=no ; start_time=[{self.restarts_called}] ; pid={self.main_pid()} ; status=0/0 }}")
 
     def restart(self):
         self.restarts_called += 1

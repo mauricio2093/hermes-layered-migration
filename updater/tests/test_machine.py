@@ -281,6 +281,8 @@ def test_cutover_aprobado_completo(world, tmp_path):
     for k in ("Backup: PASS", "Integración: PASS", "Tests: PASS", "Gateway: PASS", "Telegram: PASS",
               "Persistencia: PASS", "Rollback disponible: PASS"):
         assert k in final, k
+    # el tag verificado viaja con el codigo: Hermes calcula su version con el
+    assert git(world.prod, "rev-parse", f"refs/tags/{payload['target']['tag']}^{{commit}}") == payload["target"]["commit"]
     # la aprobacion era de un solo uso
     rid2, out2 = o.apply(code)
     assert out2 == Outcome.BLOCKED
@@ -334,6 +336,63 @@ def test_post_pruebas_fallidas_hacen_rollback(world, tmp_path):
     assert "ROLLBACK" in _states(world, rid) and "VERIFY_RECOVERY" in _states(world, rid)
     final = next(m for m in _msgs(world) if m.startswith("HERMES — Reporte de actualización"))
     assert "ROLLED_BACK" in final and "post_version_reported" in final
+
+
+def _check(world, rid, name):
+    s = Store(world.cfg.db_path)
+    try:
+        return {r["name"]: r for r in s.checks(rid)}[name]
+    finally:
+        s.close()
+
+
+def test_un_tag_distinto_ya_en_produccion_revierte(world, tmp_path):
+    o, code, payload = _prepared(world, tmp_path)
+    head = git(world.prod, "rev-parse", "HEAD")
+    git(world.prod, "tag", payload["target"]["tag"], head)            # mismo nombre, otro commit
+    _approve(world, code)
+    rid, out = o.apply()
+    assert out == Outcome.ROLLED_BACK
+    assert git(world.prod, "rev-parse", "HEAD") == head
+    assert _check(world, rid, "code")["verdict"] == "FAIL"
+
+
+def test_un_reinicio_sin_cambios_no_es_una_unit_cambiada(world, tmp_path):
+    # 2026-10-19: ExecStart de systemctl show trae pid y start_time; compararlo
+    # entero daba "la unit cambio" en cualquier despliegue.
+    o, code, payload = _prepared(world, tmp_path)
+    _approve(world, code)
+    rid, out = o.apply()
+    assert out == Outcome.SUCCESS
+    assert _check(world, rid, "post_unit")["verdict"] == "PASS"
+
+
+def test_un_execstart_cambiado_de_verdad_revierte(world, tmp_path):
+    o, code, payload = _prepared(world, tmp_path)
+    real_restart = world.svc.restart
+
+    def restart_que_reescribe_la_unit():
+        if world.svc.restarts_called == 0:     # el despliegue: algo reescribe la unit
+            world.svc.exec = "ExecStart=/x/.hermes/bin/hermes gateway run"
+        else:                                   # el rollback la deja como estaba
+            world.svc.exec = "ExecStart=/x/.venv/bin/python hermes_cli/main.py gateway run"
+        return real_restart()
+    world.svc.restart = restart_que_reescribe_la_unit
+    _approve(world, code)
+    rid, out = o.apply()
+    assert out == Outcome.ROLLED_BACK
+    assert _check(world, rid, "post_unit")["verdict"] == "FAIL"
+
+
+def test_exec_start_command_ignora_los_datos_de_ejecucion():
+    from hermes_updater.deploy import exec_start_command
+    a = ("{ path=/v/bin/python ; argv[]=/v/bin/python /r/hermes_cli/main.py gateway run ; ignore_errors=no ; "
+         "start_time=[n/a] ; stop_time=[n/a] ; pid=0 ; code=(null) ; status=0/0 }")
+    b = ("{ path=/v/bin/python ; argv[]=/v/bin/python /r/hermes_cli/main.py gateway run ; ignore_errors=no ; "
+         "start_time=[Mon 2026-10-19 13:57:49 -05] ; stop_time=[n/a] ; pid=910548 ; code=(null) ; status=0/0 }")
+    c = b.replace("/r/hermes_cli/main.py", "/r/.hermes/bin/hermes")
+    assert exec_start_command(a) == exec_start_command(b)
+    assert exec_start_command(b) != exec_start_command(c)
 
 
 def test_gateway_que_no_reinicia_hace_rollback(world, tmp_path):

@@ -22,6 +22,7 @@ Orden (cada paso deja rastro en el store ANTES de actuar):
 from __future__ import annotations
 
 import json
+import re
 import os
 import shutil
 import sqlite3
@@ -224,6 +225,18 @@ def preconditions(cfg: Config, runner: Runner, payload: dict, svc) -> list[Step]
 
 # --- despliegue ------------------------------------------------------------------
 
+_EXEC_CMD = re.compile(r"path=([^;]*?) ; argv\[\]=([^;]*?) ;")
+
+
+def exec_start_command(raw: str) -> str:
+    """Solo lo que se ejecuta (ruta + argv) de ``systemctl show -p ExecStart``.
+    La linea trae tambien start_time, pid y status, que cambian en CADA
+    reinicio: compararla entera daba "la unit cambio" tras cualquier
+    despliegue (2026-10-19, rollback de v0.22.2 sin cambio real de unit)."""
+    found = _EXEC_CMD.findall(raw or "")
+    return " | ".join(f"{p.strip()} :: {a.strip()}" for p, a in found) if found else (raw or "").strip()
+
+
 def deploy(cfg: Config, runner: Runner, payload: dict, svc, *, persist: Callable[[str, dict], None],
            ts: Optional[str] = None, sleep=time.sleep, clock=time.monotonic) -> DeployResult:
     """``persist(state, data)`` registra la transicion en el store ANTES de cada fase."""
@@ -242,7 +255,7 @@ def deploy(cfg: Config, runner: Runner, payload: dict, svc, *, persist: Callable
           "db_snapshot": str(pre / f"db-pre-deploy-{ts}"), "ts": ts,
           "db_before": db_facts(cfg.hermes_home / "state.db"),
           "content_before": content_digest(cfg.hermes_home),
-          "exec_start_before": svc.exec_start()}
+          "exec_start_before": exec_start_command(svc.exec_start())}
     res.rollback_point = rp
     persist("CONTROLLED_DEPLOYMENT", {"rollback_point": rp, "phase": "rollback_point"})
 
@@ -263,10 +276,20 @@ def deploy(cfg: Config, runner: Runner, payload: dict, svc, *, persist: Callable
     # codigo: a partir de aqui produccion cambia -> cualquier fallo = rollback
     res.deployed = True
     cand = payload["candidate"]
-    f = _git(runner, cfg.prod_repo, "fetch", "-q", cand["repo"], f"{cand['branch']}")
+    # El tag viaja con el codigo: Hermes calcula su version con los tags
+    # alcanzables desde HEAD. Sin el, v0.22.2 desplegado se presentaba como
+    # 0.21.3 (2026-10-19). git se niega a pisar un tag existente distinto.
+    tag = payload["target"]["tag"]
+    f = _git(runner, cfg.prod_repo, "fetch", "-q", "--no-tags", cand["repo"], f"{cand['branch']}",
+             f"refs/tags/{tag}:refs/tags/{tag}")
     m = _git(runner, cfg.prod_repo, "merge", "--ff-only", cand["commit"]) if f.ok else f
     if not m.ok:
         res.add("code", Verdict.FAIL, "fast-forward imposible: " + m.tail(300))
+        return _rollback_and_verify(cfg, runner, svc, res, sleep=sleep, clock=clock, persist=persist)
+    tag_commit = _git(runner, cfg.prod_repo, "rev-parse", f"refs/tags/{tag}^{{commit}}").out.strip()
+    if tag_commit != payload["target"]["commit"]:
+        res.add("code", Verdict.FAIL, f"el tag {tag} de produccion apunta a {tag_commit[:10]}, no a "
+                                      f"{payload['target']['commit'][:10]}")
         return _rollback_and_verify(cfg, runner, svc, res, sleep=sleep, clock=clock, persist=persist)
     res.add("code", Verdict.PASS, f"{payload['source']['commit'][:10]} -> {cand['commit'][:10]} (fast-forward)")
 
@@ -329,7 +352,7 @@ def post_tests(cfg: Config, runner: Runner, payload: dict, svc, rp: dict) -> lis
     log = svc.journal_since(rp.get("restart_at", time.time()))
     bad = [l for l in log.splitlines() if "Traceback" in l or " CRITICAL" in l]
     add("post_logs", not bad, "sin Traceback/CRITICAL desde el reinicio" if not bad else f"{len(bad)} lineas graves: {bad[0][:200]}")
-    es = svc.exec_start()
+    es = exec_start_command(svc.exec_start())
     add("post_unit", es == rp.get("exec_start_before"), "ExecStart sin cambios (drop-in intacto)" if es == rp.get("exec_start_before")
         else "la unit del gateway cambio durante el despliegue")
     r = runner.run([py, str(cfg.prod_repo / "hermes_cli" / "main.py"), "plugins", "list", "--plain", "--no-bundled"],
