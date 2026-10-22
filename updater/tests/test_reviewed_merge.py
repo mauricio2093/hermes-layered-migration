@@ -91,6 +91,8 @@ def test_fusion_revisada_reproduce_el_arbol_completo(world, tmp_path):
     d = _record(world, scratch, c)
     rec = json.loads((d / "record.json").read_text())
     assert rec["source"] == head and rec["tree_sha"] == reviewed_tree
+    assert sorted(p.name for p in d.iterdir()) == ["merge.pack", "record.json"]   # nada suelto
+    assert not any(p.name.endswith(".tmp") for p in d.parent.iterdir())
     cand = _prepare(world, "v0.3.0")
     assert cand.verdict == Verdict.PASS, cand.detail
     repo = Path(cand.repo)

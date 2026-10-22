@@ -138,13 +138,20 @@ def record(git, merges_dir: Path, commit: str, *, target_tag: str, reviewed_by: 
     try:
         # pack-objects sin --thin: objetos completos, sin deltas contra los padres
         listing = "\n".join(sorted(expected)) + "\n"
-        pk = git.runner.run(["git", "-C", str(git.repo), "pack-objects", "-q", str(tmp / "pack")],
-                            timeout=900, stdin=listing, env={"LC_ALL": "C"})
-        if not pk.ok:
-            raise ReviewError(f"pack-objects fallido: {pk.tail(300).strip()}")
-        name = pk.out.strip().splitlines()[-1]
-        (tmp / f"pack-{name}.pack").rename(tmp / PACK)
-        (tmp / f"pack-{name}.idx").unlink()
+        # pack-objects deja .pack, .idx y (git reciente) .rev, y los RENOMBRA desde un
+        # temporal del propio repo: se construye en el mismo sistema de ficheros que el
+        # repo y luego se copia (el estado puede estar en otro: rename daria EXDEV).
+        git_dir = Path(_out(git, "rev-parse", "--absolute-git-dir"))
+        build = Path(tempfile.mkdtemp(prefix="reviewed-pack-", dir=git_dir))
+        try:
+            pk = git.runner.run(["git", "-C", str(git.repo), "pack-objects", "-q", str(build / "pack")],
+                                timeout=900, stdin=listing, env={"LC_ALL": "C"})
+            if not pk.ok:
+                raise ReviewError(f"pack-objects fallido: {pk.tail(300).strip()}")
+            name = pk.out.strip().splitlines()[-1]
+            shutil.copyfile(build / f"pack-{name}.pack", tmp / PACK)
+        finally:
+            shutil.rmtree(build, ignore_errors=True)
         inpack = _pack_objects_independent(git, tmp / PACK)
         missing = expected - inpack
         if missing or commit not in inpack:
