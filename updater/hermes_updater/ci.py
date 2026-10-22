@@ -75,11 +75,12 @@ def wrapper(cfg: Config) -> list[str]:
 
 def parse_junit(path: Path) -> dict:
     out = {"passed": 0, "failed": 0, "errors": 0, "skipped": 0, "failed_ids": [], "passed_ids": [],
-           "internal_error": False}
+           "skipped_ids": [], "internal_error": False, "parsed": False}
     try:
         root = ET.parse(path).getroot()
     except (ET.ParseError, OSError):
         return out
+    out["parsed"] = True
     for tc in root.iter("testcase"):
         kinds = {c.tag for c in tc}
         if tc.get("classname") == "pytest" and tc.get("name") == "internal":
@@ -93,6 +94,7 @@ def parse_junit(path: Path) -> dict:
             out["failed_ids"].append(_nodeid(tc))
         elif "skipped" in kinds:
             out["skipped"] += 1
+            out["skipped_ids"].append(_nodeid(tc))
         else:
             out["passed"] += 1
             out["passed_ids"].append(_nodeid(tc))
@@ -243,6 +245,37 @@ def upstream_suite(cfg: Config, runner: Runner, name: str, patterns: Sequence[st
     return s
 
 
+def required_tests_suite(required: Sequence[str], junit: Path) -> Suite:
+    """Tests que DEBEN ejecutarse y pasar por su id, con evidencia JUnit de la
+    suite principal (sin repeticion: un requerido inestable no se perdona).
+    Un directorio de tests no lo garantiza: si el fichero desaparece o sus
+    casos se omiten o se deseleccionan, el resto de la suite puede pasar."""
+    s = Suite("required-tests", required=bool(required))
+    if not required:
+        s.verdict, s.detail = Verdict.SKIPPED, "sin tests requeridos configurados"
+        return s
+    res = parse_junit(junit)
+    if not res["parsed"]:
+        s.verdict, s.detail = Verdict.BLOCKED, f"sin evidencia JUnit legible en {junit.name}"
+        return s
+    passed, failed, skipped = set(res["passed_ids"]), set(res["failed_ids"]), set(res["skipped_ids"])
+    bad = {"fallaron": [t for t in required if t in failed],
+           "omitidos": [t for t in required if t in skipped and t not in failed],
+           "no ejecutados": [t for t in required if t not in passed | failed | skipped]}
+    s.passed = sum(1 for t in required if t in passed and t not in failed)
+    s.failed, s.skipped = len(bad["fallaron"]), len(bad["omitidos"])
+    s.failed_ids = bad["fallaron"] + bad["omitidos"] + bad["no ejecutados"]
+    if bad["fallaron"]:
+        s.verdict = Verdict.FAIL
+    elif bad["omitidos"] or bad["no ejecutados"]:
+        s.verdict = Verdict.BLOCKED
+    else:
+        s.verdict = Verdict.PASS
+    s.detail = f"{s.passed}/{len(required)} requeridos pasaron" + "".join(
+        f" | {k}: {', '.join(v[:10])}" for k, v in bad.items() if v)
+    return s
+
+
 def hermes_control_suite(cfg: Config, runner: Runner, *, python: str, cand_repo: Path, out: Path) -> Suite:
     s = Suite("hermes-control")
     repo = cfg.hermes_control_repo
@@ -347,6 +380,8 @@ def run_all(cfg: Config, runner: Runner, *, python: str, cand_repo: Path, target
     suites = [
         upstream_suite(cfg, runner, "upstream-layer2", [*LAYER2, *carried_tests], python=python,
                        cand_repo=cand_repo, pure_target=None, out=out),
+        # despues de upstream-layer2: lee su JUnit principal
+        required_tests_suite(cfg.policy.required_tests, out / "upstream-layer2.xml"),
         upstream_suite(cfg, runner, "upstream-core", UPSTREAM_CORE, python=python,
                        cand_repo=cand_repo, pure_target=pure, out=out),
         hermes_control_suite(cfg, runner, python=python, cand_repo=cand_repo, out=out),

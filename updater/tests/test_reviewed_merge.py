@@ -101,7 +101,7 @@ def test_fusion_revisada_reproduce_el_arbol_completo(world, tmp_path):
     assert "fusion revisada de arbol completo" in cand.detail
     assert "Reviewed full-tree resolution" in git(repo, "log", "-1", "--format=%B", cand.candidate_commit)
     assert cand.analysis["reviewed_merge"]["tree_sha"] == reviewed_tree
-    assert "record_use()" in cand.analysis["reviewed_merge_diff"]
+    assert "record_use()" in cand.analysis["reviewed_merge_diffs"]["vs_target"]
     assert cand.analysis["carried_invariants"]["missing"] == []
     # produccion intacta y el registro no se modifica
     assert git(world.prod, "rev-parse", "HEAD") == head and git(world.prod, "status", "--porcelain") == ""
@@ -122,13 +122,27 @@ def test_tree_distinto_al_revisado_bloquea_sin_recurrir_a_merge(world, tmp_path)
     assert cand.candidate_commit is None and "recorded_resolutions" not in cand.analysis
 
 
-def test_bundle_corrupto_bloquea(world, tmp_path):
+def test_pack_corrupto_bloquea_por_digest(world, tmp_path):
     _moved_function(world)
     scratch, c = _resolve_by_hand(world, tmp_path)
     d = _record(world, scratch, c)
-    (d / "merge.bundle").write_bytes(b"no es un bundle\n")
+    (d / "merge.pack").chmod(0o600)
+    (d / "merge.pack").write_bytes(b"no es un pack\n")
     cand = _prepare(world, "v0.3.0")
-    assert cand.verdict == Verdict.BLOCKED and "bundle" in cand.detail
+    assert cand.verdict == Verdict.BLOCKED and "digest" in cand.detail
+
+
+def test_pack_corrupto_con_digest_recalculado_bloquea_por_pack(world, tmp_path):
+    _moved_function(world)
+    scratch, c = _resolve_by_hand(world, tmp_path)
+    d = _record(world, scratch, c)
+    (d / "merge.pack").chmod(0o600)
+    (d / "merge.pack").write_bytes(b"PACK basura")
+    rec = json.loads((d / "record.json").read_text())
+    rec["pack_sha256"] = reviewed_merge._sha256(d / "merge.pack")
+    (d / "record.json").write_text(json.dumps(rec))
+    cand = _prepare(world, "v0.3.0")
+    assert cand.verdict == Verdict.BLOCKED and "pack" in cand.detail
 
 
 def test_registro_ilegible_bloquea(world, tmp_path):
@@ -189,3 +203,99 @@ def test_record_acepta_marcas_que_ya_traia_upstream(world, tmp_path):
     assert git(scratch, "show", f"{c}:conflict_sample.py") == literal.rstrip("\n")
     d = _record(world, scratch, c)
     assert (d / "record.json").exists()
+
+
+@pytest.mark.parametrize("payload, needle", [
+    ("[]", "no es un objeto JSON"), ("null", "no es un objeto JSON"), ('"texto"', "no es un objeto JSON"),
+    ("{", "ilegible"), ('{"schema_version": 2}', "schema_version"), ('{"schema_version": true}', "schema_version"),
+])
+def test_record_json_de_tipo_o_esquema_incorrecto_bloquea(world, tmp_path, payload, needle):
+    _moved_function(world)
+    scratch, c = _resolve_by_hand(world, tmp_path)
+    d = _record(world, scratch, c)
+    (d / "record.json").write_text(payload)
+    cand = _prepare(world, "v0.3.0")
+    assert cand.verdict == Verdict.BLOCKED and needle in cand.detail, cand.detail
+    assert "Traceback" not in cand.detail
+
+
+@pytest.mark.parametrize("missing", ["record.json", "merge.pack"])
+def test_entrada_parcial_bloquea(world, tmp_path, missing):
+    _moved_function(world)
+    scratch, c = _resolve_by_hand(world, tmp_path)
+    d = _record(world, scratch, c)
+    (d / missing).unlink()
+    cand = _prepare(world, "v0.3.0")
+    assert cand.verdict == Verdict.BLOCKED and missing in cand.detail
+
+
+def test_enlace_roto_no_cuenta_como_ausente(world, tmp_path):
+    _moved_function(world)
+    head = git(world.prod, "rev-parse", "HEAD")
+    target = git(world.up, "rev-parse", "v0.3.0^{commit}")
+    world.cfg.merges_dir.mkdir(parents=True)
+    (world.cfg.merges_dir / f"{head}-{target}").symlink_to(tmp_path / "no-existe")
+    cand = _prepare(world, "v0.3.0")
+    assert cand.verdict == Verdict.BLOCKED and "no es un directorio real" in cand.detail
+    assert "reviewed_merge" not in cand.analysis and cand.conflicts == []
+
+
+def test_entrada_que_es_un_fichero_bloquea(world, tmp_path):
+    _moved_function(world)
+    head = git(world.prod, "rev-parse", "HEAD")
+    target = git(world.up, "rev-parse", "v0.3.0^{commit}")
+    world.cfg.merges_dir.mkdir(parents=True)
+    (world.cfg.merges_dir / f"{head}-{target}").write_text("x")
+    cand = _prepare(world, "v0.3.0")
+    assert cand.verdict == Verdict.BLOCKED and "no es un directorio real" in cand.detail
+
+
+def test_pack_es_autocontenido_y_se_verifica_sin_alternates(world, tmp_path):
+    _moved_function(world)
+    scratch, c = _resolve_by_hand(world, tmp_path)
+    d = _record(world, scratch, c)
+    g = staging.Git(world.runner, scratch)
+    objs = reviewed_merge._pack_objects_independent(g, d / "merge.pack")
+    rec = json.loads((d / "record.json").read_text())
+    assert c in objs and len(objs) == rec["pack_objects"] and rec["schema_version"] == 1
+    assert reviewed_merge._expected_objects(g, c, *git(scratch, "rev-list", "--parents", "-n1", c).split()[1:]) <= objs
+
+
+def test_status_fallido_tras_aplicar_bloquea(world, tmp_path, monkeypatch):
+    _moved_function(world)
+    scratch, c = _resolve_by_hand(world, tmp_path)
+    _record(world, scratch, c)
+    real_call = staging.Git.__call__
+
+    def fake(self, *args, **kw):
+        if args[:1] == ("status",):
+            from hermes_updater.proc import Result
+            return Result(("git", "status"), 128, "", 0.0)      # error con salida vacia
+        return real_call(self, *args, **kw)
+    monkeypatch.setattr(staging.Git, "__call__", fake)
+    cand = _prepare(world, "v0.3.0")
+    assert cand.verdict == Verdict.BLOCKED and "arbol de trabajo" in cand.detail
+
+
+def test_excepcion_inesperada_bloquea_con_motivo(world, tmp_path, monkeypatch):
+    _moved_function(world)
+    scratch, c = _resolve_by_hand(world, tmp_path)
+    _record(world, scratch, c)
+    monkeypatch.setattr(reviewed_merge, "_load", lambda d: (_ for _ in ()).throw(KeyError("x")))
+    cand = _prepare(world, "v0.3.0")
+    assert cand.verdict == Verdict.BLOCKED and "KeyError" in cand.detail
+
+
+def test_el_auditor_recibe_la_fusion_revisada_y_los_diffs(world, tmp_path):
+    from hermes_updater import review
+    _moved_function(world)
+    scratch, c = _resolve_by_hand(world, tmp_path)
+    _record(world, scratch, c)
+    cand = _prepare(world, "v0.3.0")
+    assert cand.verdict == Verdict.PASS, cand.detail
+    ev = review.build_evidence(versions={}, backup={}, candidate=cand.to_dict(), tests=[], git_log="", home="/nadie")
+    a = ev["analysis"]
+    assert a["reviewed_merge"]["tree_sha"] and "no es una aprobacion" in a["reviewed_merge"]["integrity_only"]
+    assert "record_use()" in a["reviewed_merge_diffs"]["vs_target"]          # lo propio, contra upstream
+    assert a["reviewed_merge_diffs"]["vs_source_stat"]
+    assert a["carried_invariants"]["missing"] == []

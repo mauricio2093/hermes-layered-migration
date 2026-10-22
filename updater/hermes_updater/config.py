@@ -68,6 +68,18 @@ class Policy:
         "plugins/platforms/telegram/adapter.py::_l2_menu_mod.should_publish(",  # Capa 2: menu
         "plugins/platforms/telegram/adapter.py::_copy_button_kwargs(",          # botones de copiar
     )
+    #: Tests que deben EJECUTARSE y PASAR por id en upstream-layer2 (evidencia
+    #: JUnit). Si faltan, se omiten o no se ejecutan, el candidato no pasa.
+    #: Una lista vacia desactiva la comprobacion.
+    required_tests: tuple = tuple(
+        "tests/layer2/test_command_usage_hooks.py::" + t for t in (
+            "test_gateway_hook_records_the_canonical_command_per_platform",
+            "test_gateway_hook_counts_each_dispatch",
+            "test_gateway_hook_without_platform_records_nothing",
+            "test_gateway_hook_fails_open_without_state_db",
+            "test_gateway_hook_deny_still_records_and_blocks",
+            "test_cli_dispatch_records_resolved_commands",
+        ))
     # Arrancar y conectar a Telegram tarda ~45-60 s en este equipo (2026-10-19).
     service_ready_timeout_s: int = 300
     service_stable_s: int = 20

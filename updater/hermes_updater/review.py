@@ -115,7 +115,8 @@ def build_evidence(*, versions: dict, backup: dict, candidate: dict, tests: list
             "ref_integrity", "carried", "carried_still_needed", "carried_already_upstream", "merge_base",
             "upstream_commits", "upstream_files_changed", "overlap_with_carried", "plugin_api_files_changed",
             "migration_files_changed", "schema_version", "config_version", "dependencies",
-            "target_contains_source_upstream_base", "recorded_resolutions", "recorded_resolution_diff")},
+            "target_contains_source_upstream_base", "recorded_resolutions", "recorded_resolution_diff",
+            "reviewed_merge", "reviewed_merge_diffs", "carried_invariants")},
         "dependencies": {k: (candidate.get("deps") or {}).get(k)
                          for k in ("extras", "extras_gone_in_target", "pip_check", "changed", "dropped")},
         "tests": [{k: t.get(k) for k in ("name", "required", "verdict", "passed", "failed", "errors", "skipped",

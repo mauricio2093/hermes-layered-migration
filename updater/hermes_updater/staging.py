@@ -290,14 +290,15 @@ def prepare(cfg: Config, runner: Runner, *, target_tag: str, target_commit: str,
                 git, rec_dir, source=source, target=target_commit,
                 message=msg + f"\n\nReviewed full-tree resolution {source[:10]}..{target_commit[:10]} "
                               f"(record {rec_dir.name[:10]}..)")
-        except reviewed_merge.ReviewError as exc:
+        except Exception as exc:  # noqa: BLE001 -- fail-closed ante CUALQUIER fallo, no solo los previstos
             git("reset", "-q", "--hard", source)
             cand.analysis.update(analyze(git, source, target_commit, None))
             cand.verdict = Verdict.BLOCKED
-            cand.detail = f"fusion revisada registrada para esta pareja, pero inservible: {exc}"
+            why = str(exc) if isinstance(exc, reviewed_merge.ReviewError) else f"{type(exc).__name__}: {exc}"
+            cand.detail = f"fusion revisada registrada para esta pareja, pero inservible: {why}"
             return cand
         cand.analysis["reviewed_merge"] = info
-        cand.analysis["reviewed_merge_diff"] = git.out("show", "--cc", "--format=", "HEAD")[:20_000]
+        cand.analysis["reviewed_merge_diffs"] = reviewed_merge.review_diffs(git, "HEAD", source, target_commit)
         m = Result(("reviewed-merge",), 0, "", 0.0)
     else:
         m = git("merge", "--no-ff", "--no-edit", "-m", msg, f"refs/tags/{target_tag}", timeout=900)

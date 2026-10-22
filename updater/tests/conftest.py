@@ -269,7 +269,8 @@ def world(tmp_path, monkeypatch):
                               "net_backoff_s": 0, "notify_transport": "file", "ai_provider": "none",
                               "service_ready_timeout_s": 3, "service_stable_s": 1, "notify_retries": 1,
                               # la Capa 2 del mundo de prueba; las de produccion no existen aqui
-                              "carried_invariants": ["hermes_layer2/::MENU = 1"]})
+                              "carried_invariants": ["hermes_layer2/::MENU = 1"],
+                              "required_tests": ["tests/layer2/test_menu.py::test_ok"]})
 
     class W:
         pass
