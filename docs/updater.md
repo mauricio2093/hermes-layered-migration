@@ -253,6 +253,43 @@ resoluciones viven en `~/.local/state/hermes-updater/resolutions/rr-cache`
 Grabar una resolución: repetir el merge en un clon con `rerere.enabled`,
 resolver, revisar, `git commit`, y copiar su `.git/rr-cache` a ese directorio.
 
+## Fusiones revisadas de árbol completo (desde 2026-10-22)
+
+rerere solo reaplica lo que cambió **dentro** de un fichero en conflicto. En
+v0.22.4 upstream movió `_hm_command_hooks` a un fichero nuevo
+(`gateway/run_inbound_hooks.py`); la llamada de Capa 2 hubo que reinsertarla
+fuera de los bloques en conflicto y una repetición solo con rerere la perdía en
+silencio: 19 líneas, sin que fallara ninguna prueba.
+
+- Registro: `~/.local/state/hermes-updater/resolutions/merges/<source>-<target>/`
+  con `record.json` (source, target, commit, **tree_sha**, quién y cuándo
+  revisó) y `merge.bundle` (el commit, prerrequisitos `^source ^target`).
+- Grabar: `hermes-updater record-merge --repo <clon> --commit <sha> --tag vX.Y.Z
+  --reviewed-by <nombre>`. Exige dos padres, que el segundo sea el tag y que la
+  resolución no introduzca marcas de conflicto; nunca sobrescribe un registro.
+- Uso: solo si el HEAD productivo y el commit del tag son **exactamente** los
+  registrados. El candidato se crea con `commit-tree` sobre el tree revisado, y
+  se comprueba el árbol completo, no el SHA del commit.
+- **Fail-closed**: si existe registro para esa pareja y falla algo (registro
+  ilegible, bundle, padres, tree), el candidato queda BLOCKED y **no** se recurre
+  a merge ni a rerere. Una pareja distinta ignora el registro.
+- El auditor IA recibe `reviewed_merge` y el diff combinado (`show --cc`).
+
+### Invariantes de las capas propias
+
+`policy.carried_invariants` (lista `"ruta::literal"`): cada literal debe
+aparecer bajo su ruta en el commit candidato (`git grep -F`). Se comprueba en
+**todo** candidato (merge limpio, rerere o fusión revisada); si falta uno, el
+candidato queda BLOCKED. Por defecto: `record_command_use(` en `gateway/`,
+`_l2_record_use(` en `cli.py`, `_l2_menu_mod.should_publish(` y
+`_copy_button_kwargs(` en `telegram/adapter.py`. Es una red estática; la prueba
+de comportamiento es `tests/layer2/test_command_usage_hooks.py` del branch
+llevado, que ejecuta los hooks reales.
+
+`auto_apply` quedó en `false` el 2026-10-22 (decisión de Mauricio) mientras
+esto se revisa e instala. Copia previa:
+`~/.local/state/hermes-updater/config.toml.bak-20261022-autoapply`.
+
 ## Notificaciones
 
 Por `hermes send --to telegram` (CLI oficial de Hermes para scripts y cron;

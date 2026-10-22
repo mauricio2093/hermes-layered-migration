@@ -20,6 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
+from . import reviewed_merge
 from .config import Config
 from .proc import Result, Runner, retry
 from .status import Verdict
@@ -280,7 +281,26 @@ def prepare(cfg: Config, runner: Runner, *, target_tag: str, target_commit: str,
     msg = (f"Merge upstream {target_tag} into {branch}\n\n"
            f"Candidate prepared by hermes-updater in an isolated clone.\n"
            f"source {source}\ntarget {target_commit} ({target_tag})")
-    m = git("merge", "--no-ff", "--no-edit", "-m", msg, f"refs/tags/{target_tag}", timeout=900)
+    rec_dir = reviewed_merge.find(cfg.merges_dir, source, target_commit)
+    if rec_dir is not None:
+        # Fusion revisada de arbol completo para ESTA pareja: fail-closed, sin
+        # caer a merge/rerere si el registro no cuadra.
+        try:
+            info = reviewed_merge.apply(
+                git, rec_dir, source=source, target=target_commit,
+                message=msg + f"\n\nReviewed full-tree resolution {source[:10]}..{target_commit[:10]} "
+                              f"(record {rec_dir.name[:10]}..)")
+        except reviewed_merge.ReviewError as exc:
+            git("reset", "-q", "--hard", source)
+            cand.analysis.update(analyze(git, source, target_commit, None))
+            cand.verdict = Verdict.BLOCKED
+            cand.detail = f"fusion revisada registrada para esta pareja, pero inservible: {exc}"
+            return cand
+        cand.analysis["reviewed_merge"] = info
+        cand.analysis["reviewed_merge_diff"] = git.out("show", "--cc", "--format=", "HEAD")[:20_000]
+        m = Result(("reviewed-merge",), 0, "", 0.0)
+    else:
+        m = git("merge", "--no-ff", "--no-edit", "-m", msg, f"refs/tags/{target_tag}", timeout=900)
     if not m.ok and recorded:
         reused = _commit_recorded_resolution(git, repo, msg)
         if reused:
@@ -299,6 +319,12 @@ def prepare(cfg: Config, runner: Runner, *, target_tag: str, target_commit: str,
         return cand
     cand.candidate_commit = git.out("rev-parse", "HEAD")
     cand.analysis.update(analyze(git, source, target_commit, cand.candidate_commit))
+    missing = reviewed_merge.check_invariants(git, cand.candidate_commit, cfg.policy.carried_invariants)
+    cand.analysis["carried_invariants"] = {"required": list(cfg.policy.carried_invariants), "missing": missing}
+    if missing:
+        cand.verdict = Verdict.BLOCKED
+        cand.detail = "el candidato pierde codigo de las capas propias: falta " + "; ".join(missing)
+        return cand
     if not cand.analysis.get("target_contains_source_upstream_base"):
         cand.verdict = Verdict.BLOCKED
         cand.detail = ("el tag objetivo NO contiene la base upstream que ya corre en produccion: "
@@ -311,8 +337,13 @@ def prepare(cfg: Config, runner: Runner, *, target_tag: str, target_commit: str,
             cand.verdict, cand.detail = Verdict.FAIL, detail
             return cand
     cand.verdict = Verdict.PASS
-    how = ("merge de {t} sobre {b} con resoluciones revisadas en: " + ", ".join(cand.analysis["recorded_resolutions"])) \
-        if cand.analysis.get("recorded_resolutions") else "merge limpio de {t} sobre {b}"
+    if cand.analysis.get("reviewed_merge"):
+        how = ("fusion revisada de arbol completo de {t} sobre {b} (tree "
+               + cand.analysis["reviewed_merge"]["tree_sha"][:10] + ")")
+    elif cand.analysis.get("recorded_resolutions"):
+        how = "merge de {t} sobre {b} con resoluciones revisadas en: " + ", ".join(cand.analysis["recorded_resolutions"])
+    else:
+        how = "merge limpio de {t} sobre {b}"
     cand.detail = how.format(t=target_tag, b=branch) + f"; {cand.analysis['carried_still_needed']} commits propios conservados"
     return cand
 

@@ -58,6 +58,16 @@ class Policy:
     #: salvaguardas no cambian: backup previo, post-pruebas, rollback automatico
     #: y aviso por Telegram. Decision del usuario (2026-10-19).
     auto_apply: bool = False
+    #: Codigo de las capas propias que todo candidato debe conservar, como
+    #: "ruta::literal" (git grep -F en esa ruta del commit). Defiende de una
+    #: fusion que pierda una capa SIN conflicto (rerere no lo ve: v0.22.4,
+    #: 2026-10-22). Una lista vacia desactiva la comprobacion.
+    carried_invariants: tuple = (
+        "gateway/::record_command_use(",            # Capa 2: uso de comandos en el gateway
+        "cli.py::_l2_record_use(",                 # Capa 2: uso de comandos en la CLI
+        "plugins/platforms/telegram/adapter.py::_l2_menu_mod.should_publish(",  # Capa 2: menu
+        "plugins/platforms/telegram/adapter.py::_copy_button_kwargs(",          # botones de copiar
+    )
     # Arrancar y conectar a Telegram tarda ~45-60 s en este equipo (2026-10-19).
     service_ready_timeout_s: int = 300
     service_stable_s: int = 20
@@ -115,6 +125,11 @@ class Config:
         """``rr-cache`` de git rerere con resoluciones de conflicto REVISADAS.
         Solo se reutilizan si el conflicto es identico al revisado."""
         return self.state_dir / "resolutions" / "rr-cache"
+
+    @property
+    def merges_dir(self) -> Path:
+        """Fusiones revisadas de arbol completo, una por pareja (origen, objetivo)."""
+        return self.state_dir / "resolutions" / "merges"
 
     @property
     def prod_python(self) -> Path:

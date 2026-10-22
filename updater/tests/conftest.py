@@ -267,7 +267,9 @@ def world(tmp_path, monkeypatch):
                       approvals_owner_uid=os.getuid(), hermes_control_repo=str(tmp_path / "no-hc"),
                       policy={"min_free_disk_gb": 0.01, "min_avail_mem_mb": 1, "net_retries": 2,
                               "net_backoff_s": 0, "notify_transport": "file", "ai_provider": "none",
-                              "service_ready_timeout_s": 3, "service_stable_s": 1, "notify_retries": 1})
+                              "service_ready_timeout_s": 3, "service_stable_s": 1, "notify_retries": 1,
+                              # la Capa 2 del mundo de prueba; las de produccion no existen aqui
+                              "carried_invariants": ["hermes_layer2/::MENU = 1"]})
 
     class W:
         pass

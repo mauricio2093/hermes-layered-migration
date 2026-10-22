@@ -7,6 +7,8 @@
   hermes-updater rollback --run N [--hard]       (manual; --hard restaura las bases)
   hermes-updater status | flush | checks --run N
   hermes-updater revoke CODIGO --reason TEXTO   (anula un candidato pendiente)
+  hermes-updater record-merge --repo CLON --commit SHA --tag vX.Y.Z --reviewed-by NOMBRE [--note TEXTO]
+                                                 (guarda una fusion revisada de arbol completo)
 
 Codigos de salida (como hermes-maint: un hallazgo nunca se pinta de verde):
   0 SUCCESS / NO_UPDATES     3 otra ejecucion tiene el candado
@@ -85,6 +87,12 @@ def main(argv=None) -> int:
     rv = sub.add_parser("revoke")
     rv.add_argument("code")
     rv.add_argument("--reason", required=True)
+    rm = sub.add_parser("record-merge")
+    rm.add_argument("--repo", type=Path, required=True)
+    rm.add_argument("--commit", required=True)
+    rm.add_argument("--tag", required=True)
+    rm.add_argument("--reviewed-by", required=True)
+    rm.add_argument("--note", default="")
     args = ap.parse_args(argv)
 
     cfg = config.load(args.config)
@@ -145,6 +153,19 @@ def main(argv=None) -> int:
         return 0
     if args.cmd == "revoke":
         return _revoke(cfg, runner, args.code, args.reason)
+    if args.cmd == "record-merge":
+        # Sin red y sin tocar produccion: lee el clon indicado y escribe el registro.
+        from .reviewed_merge import ReviewError, record
+        from .staging import Git
+        try:
+            d = record(Git(runner, args.repo), cfg.merges_dir, args.commit, target_tag=args.tag,
+                       reviewed_by=args.reviewed_by, note=args.note)
+        except ReviewError as exc:
+            print(f"no registrado: {exc}")
+            return 6
+        print((d / "record.json").read_text().rstrip())
+        print(f"registrado en {d}")
+        return 0
     if args.cmd == "rollback":
         st = Store(cfg.db_path)
         try:
