@@ -54,6 +54,9 @@ class Suite:
     regressions: list = field(default_factory=list)
     #: fallaron y pasaron al repetirlos en el candidato: se informan, no se ocultan
     flaky: list = field(default_factory=list)
+    #: el conjunto EXACTO que se repitio en el candidato; la linea base corre el
+    #: mismo, porque hay tests que solo fallan segun que otros corren antes
+    recheck_ids: list = field(default_factory=list)
     internal_error: bool = False
     duration_s: float = 0.0
     detail: str = ""
@@ -166,6 +169,7 @@ def recheck(cfg: Config, runner: Runner, s: Suite, *, python: str, cwd: Path, ju
                         timeout=cfg.policy.test_timeout_s)
     if res["passed"] + res["failed"] + res["errors"] == 0:
         return
+    s.recheck_ids = list(s.failed_ids)
     still = set(res["failed_ids"])
     passed = set(res["passed_ids"])
     # solo es inestable lo que la repeticion vio PASAR con ese mismo id; un id que
@@ -188,10 +192,16 @@ def recheck(cfg: Config, runner: Runner, s: Suite, *, python: str, cwd: Path, ju
 def classify(cfg: Config, runner: Runner, s: Suite, *, python: str, baseline_cwd: Path,
              junit: Path, env: Optional[dict] = None) -> None:
     """Re-ejecuta los fallidos en la linea base. Fallan alli tambien ->
-    preexistentes. Pasan alli -> regresion del candidato."""
+    preexistentes. Pasan alli -> regresion del candidato.
+
+    La linea base corre el MISMO conjunto que la repeticion del candidato
+    (inestables incluidos): un test que falla segun el orden fallaria en el
+    candidato y pasaria en una base sin sus vecinos, y saldria como regresion
+    falsa (v0.22.4, 2026-10-22: 31 de test_plugin_oauth.py)."""
     if not s.failed_ids:
         return
-    res, r = run_pytest(cfg, runner, python=python, cwd=baseline_cwd, targets=s.failed_ids,
+    targets = s.recheck_ids or s.failed_ids
+    res, r = run_pytest(cfg, runner, python=python, cwd=baseline_cwd, targets=targets,
                         junit=junit, env=env, timeout=cfg.policy.test_timeout_s)
     base_failed = set(res["failed_ids"])
     ran = res["passed"] + res["failed"] + res["errors"]

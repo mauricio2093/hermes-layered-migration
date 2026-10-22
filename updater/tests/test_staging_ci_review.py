@@ -343,6 +343,39 @@ def test_muchos_inestables_a_la_vez_no_son_inestabilidad(world, tmp_path, monkey
     assert "demasiados para ser inestabilidad" in s.detail
 
 
+def test_fallo_segun_el_orden_se_compara_con_el_mismo_conjunto(world, tmp_path):
+    # 2026-10-22, v0.22.4: un test inestable deja estado global y su vecino falla
+    # solo si corre despues. La repeticion del candidato los corre juntos; la base
+    # corria solo el vecino y lo veia pasar -> 31 regresiones falsas.
+    flag = tmp_path / "ya-fallo"
+    body = ("import os, pathlib\n"
+            f"F = pathlib.Path({str(flag)!r})\n"
+            "def test_a_contamina():\n"
+            "    os.environ['CONTAMINADO'] = '1'\n"
+            "    if not F.exists():\n        F.write_text('x')\n        assert False\n"
+            "def test_b_victima():\n"
+            "    assert os.environ.get('CONTAMINADO') != '1'\n")
+    cand = _repo_with_tests(tmp_path / "cand", {"tests/test_a.py": body})
+    base = _repo_with_tests(tmp_path / "base", {"tests/test_a.py": body})
+    s = ci.upstream_suite(world.cfg, world.runner, "x", ["tests/test_a.py"], python=sys.executable,
+                          cand_repo=cand, pure_target=base, out=tmp_path / "out")
+    assert s.flaky == ["tests/test_a.py::test_a_contamina"]
+    assert s.recheck_ids == ["tests/test_a.py::test_a_contamina", "tests/test_a.py::test_b_victima"]
+    assert s.regressions == [] and s.preexisting == ["tests/test_a.py::test_b_victima"]
+    assert s.verdict == Verdict.PASS, s.detail
+
+
+def test_regresion_real_sigue_detectandose_con_el_mismo_conjunto(world, tmp_path):
+    flag = tmp_path / "ya-fallo"
+    head = f"import pathlib\nF = pathlib.Path({str(flag)!r})\n"
+    flaky = "def test_a_inestable():\n    if not F.exists():\n        F.write_text('x')\n        assert False\n"
+    cand = _repo_with_tests(tmp_path / "cand", {"tests/test_a.py": head + flaky + "def test_b():\n    assert False\n"})
+    base = _repo_with_tests(tmp_path / "base", {"tests/test_a.py": head + flaky + "def test_b():\n    assert True\n"})
+    s = ci.upstream_suite(world.cfg, world.runner, "x", ["tests/test_a.py"], python=sys.executable,
+                          cand_repo=cand, pure_target=base, out=tmp_path / "out")
+    assert s.verdict == Verdict.FAIL and s.regressions == ["tests/test_a.py::test_b"]
+
+
 def test_un_fallo_que_se_repite_sigue_siendo_regresion(world, tmp_path):
     cand = _repo_with_tests(tmp_path / "cand", {"tests/test_a.py": "def test_x():\n    assert False\n"})
     base = _repo_with_tests(tmp_path / "base", {"tests/test_a.py": "def test_x():\n    assert True\n"})
