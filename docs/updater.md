@@ -312,7 +312,7 @@ que ejecutan el `_hm_command_hooks` real del gateway. El de la CLI es una
 comprobación estática (`inspect.getsource`), porque `process_command` necesita
 un terminal.
 
-`auto_apply` quedó en `false` el 2026-10-22 (decisión de Mauricio) mientras
+`auto_apply` quedó en `false` el 2026-10-22 (decisión del operador) mientras
 esto se revisa e instala. Copia previa:
 `~/.local/state/hermes-updater/config.toml.bak-20261022-autoapply`.
 
